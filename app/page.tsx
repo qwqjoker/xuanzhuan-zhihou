@@ -28,6 +28,43 @@ type Tool = "wall" | "erase";
 type BoardSource = "answer" | "reference";
 type SetupMode = "start" | "exit" | "walls";
 type EdgeKind = "h" | "v";
+type SavedBoardKind = "answer" | "generated";
+
+type SavedQuestion = {
+  id: string;
+  name: string;
+  savedAt: string;
+  size: number;
+  beads: BeadConfig[];
+  turnCount: number;
+  rotations: Rotation[];
+  puzzle?: Puzzle;
+  solutions?: Puzzle[];
+  selectedSolutionIndex?: number;
+};
+
+type SavedBoard = {
+  id: string;
+  name: string;
+  kind: SavedBoardKind;
+  savedAt: string;
+  size: number;
+  beads: BeadConfig[];
+  rotations: Rotation[];
+  walls: WallGrid;
+  puzzle?: Puzzle;
+};
+
+type BoardStats = {
+  panelCount: number;
+  dropCount: number;
+  completed: boolean;
+  completionRound: number | null;
+  events: { round: number; colors: Color[] }[];
+};
+
+const QUESTION_LIBRARY_KEY = "旋转之后_v5_题目库";
+const BOARD_LIBRARY_KEY = "旋转之后_v5_盘面库";
 
 const gravityLabel = { up: "向上", right: "向右", down: "向下", left: "向左" };
 const directionLabel = { up: "上", right: "右", down: "下", left: "左" };
@@ -40,6 +77,39 @@ function defaultRotations(count: number): Rotation[] {
     { length: count },
     (_, index) => DEFAULT_ROTATION_PATTERN[index % DEFAULT_ROTATION_PATTERN.length],
   );
+}
+
+function newLibraryId(prefix: string) {
+  const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function defaultLibraryName(prefix: string, nextIndex: number) {
+  return `${prefix} ${nextIndex}`;
+}
+
+function boardStats(walls: WallGrid, beads: BeadConfig[], rotations: Rotation[]): BoardStats {
+  const frames = simulateWalls(walls, beads, rotations);
+  const events = frames
+    .filter((frame) => frame.round > 0 && frame.dropped.length > 0)
+    .map((frame) => ({ round: frame.round, colors: [...frame.dropped] }));
+  const dropCount = events.reduce((count, event) => count + event.colors.length, 0);
+  return {
+    panelCount: countInternalPanels(walls),
+    dropCount,
+    completed: dropCount === beads.length,
+    completionRound: dropCount === beads.length ? (events.at(-1)?.round ?? 0) : null,
+    events,
+  };
+}
+
+function dropEventText(events: BoardStats["events"]) {
+  if (events.length === 0) return "暂无珠子掉落";
+  return events
+    .map((event) => `第${event.round}轮：${event.colors.map((color) => COLOR_LABEL[color]).join("、")}`)
+    .join("；");
 }
 
 function cellLabel(row: number, col: number) {
@@ -356,6 +426,12 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const lastAnimatedRound = useRef(0);
   const generationWorker = useRef<Worker | null>(null);
+  const [savedQuestions, setSavedQuestions] = useState<SavedQuestion[]>([]);
+  const [savedBoards, setSavedBoards] = useState<SavedBoard[]>([]);
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const [selectedBoardId, setSelectedBoardId] = useState("");
+  const [libraryName, setLibraryName] = useState("");
+  const [storageReady, setStorageReady] = useState(false);
 
   const activeBead = beads.find((bead) => bead.color === activeColor) ?? beads[0];
   const displayedWalls = source === "reference" && puzzle ? puzzle.referenceWalls : walls;
@@ -367,8 +443,50 @@ export default function Home() {
   }, [activeRotations, displayedWalls, playbackBeads]);
   const currentFrame = frames[Math.min(round, frames.length - 1)];
   const boardPositions = displayPositions;
+  const currentStats = useMemo(
+    () => boardStats(displayedWalls, playbackBeads, activeRotations),
+    [activeRotations, displayedWalls, playbackBeads],
+  );
+  const selectedSavedBoard = savedBoards.find((item) => item.id === selectedBoardId) ?? null;
+  const selectedSavedBoardStats = useMemo(
+    () => selectedSavedBoard
+      ? boardStats(selectedSavedBoard.walls, selectedSavedBoard.beads, selectedSavedBoard.rotations)
+      : null,
+    [selectedSavedBoard],
+  );
 
   useEffect(() => () => generationWorker.current?.terminate(), []);
+
+  useEffect(() => {
+    try {
+      const questions = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_KEY) ?? "[]");
+      const boards = JSON.parse(window.localStorage.getItem(BOARD_LIBRARY_KEY) ?? "[]");
+      if (Array.isArray(questions)) setSavedQuestions(questions);
+      if (Array.isArray(boards)) setSavedBoards(boards);
+    } catch {
+      setNotice("本机题库读取失败；仍可继续使用程序并通过 JSON 文件保存。");
+    } finally {
+      setStorageReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    try {
+      window.localStorage.setItem(QUESTION_LIBRARY_KEY, JSON.stringify(savedQuestions));
+    } catch {
+      setNotice("本机题库空间不足，请删除不需要的保存项或使用 JSON 文件保存。");
+    }
+  }, [savedQuestions, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    try {
+      window.localStorage.setItem(BOARD_LIBRARY_KEY, JSON.stringify(savedBoards));
+    } catch {
+      setNotice("本机盘面库空间不足，请删除不需要的保存项。");
+    }
+  }, [savedBoards, storageReady]);
 
   useEffect(() => {
     if (!playing) return;
@@ -765,6 +883,141 @@ export default function Home() {
     setValidation(null);
   }
 
+  function saveCurrentQuestion() {
+    const name = libraryName.trim() || defaultLibraryName("题目", savedQuestions.length + 1);
+    const item: SavedQuestion = {
+      id: newLibraryId("question"),
+      name,
+      savedAt: new Date().toISOString(),
+      size,
+      beads: structuredClone(beads),
+      turnCount,
+      rotations: [...plannedRotations],
+      puzzle: puzzle ? structuredClone(puzzle) : undefined,
+      solutions: solutions.length > 0 ? structuredClone(solutions) : undefined,
+      selectedSolutionIndex: puzzle ? Math.max(0, solutions.indexOf(puzzle)) : undefined,
+    };
+    setSavedQuestions((items) => [item, ...items]);
+    setSelectedQuestionId(item.id);
+    setLibraryName("");
+    setNotice(`“${name}”已保存到本机题库，可从下拉框随时载入。`);
+  }
+
+  function loadSavedQuestion() {
+    const item = savedQuestions.find((question) => question.id === selectedQuestionId);
+    if (!item) {
+      setNotice("请先从题目下拉框选择一项。");
+      return;
+    }
+    const nextBeads = structuredClone(item.beads);
+    const nextSolutions = item.solutions?.length ? structuredClone(item.solutions) : [];
+    const nextPuzzle = nextSolutions.length > 0
+      ? nextSolutions[Math.min(item.selectedSolutionIndex ?? 0, nextSolutions.length - 1)]
+      : item.puzzle ? structuredClone(item.puzzle) : null;
+    setSize(item.size);
+    setBeads(nextBeads);
+    setActiveColor(nextBeads[0]?.color ?? "red");
+    setTurnCount(item.turnCount);
+    setPlannedRotations([...item.rotations]);
+    setPuzzle(nextPuzzle);
+    setSolutions(nextSolutions.length > 0 ? nextSolutions : nextPuzzle ? [nextPuzzle] : []);
+    setWalls(makeAnswerWalls(item.size, nextBeads));
+    setUndoStack([]);
+    setSource("answer");
+    setSetupMode(nextPuzzle ? "walls" : "start");
+    setRound(0);
+    setPlaying(false);
+    setDisplayAngle(0);
+    setDisplayPositions(positionsFromBeads(nextBeads));
+    setValidation(null);
+    setNotice(`已载入题目“${item.name}”，作答盘面已重置。`);
+  }
+
+  function deleteSavedQuestion() {
+    const item = savedQuestions.find((question) => question.id === selectedQuestionId);
+    if (!item) return;
+    setSavedQuestions((items) => items.filter((question) => question.id !== item.id));
+    setSelectedQuestionId("");
+    setNotice(`已从本机题库删除“${item.name}”。`);
+  }
+
+  function saveAnswerBoard() {
+    const name = libraryName.trim() || defaultLibraryName("作答盘面", savedBoards.length + 1);
+    const item: SavedBoard = {
+      id: newLibraryId("board"),
+      name,
+      kind: "answer",
+      savedAt: new Date().toISOString(),
+      size,
+      beads: structuredClone(playbackBeads),
+      rotations: [...activeRotations],
+      walls: cloneWalls(walls),
+      puzzle: puzzle ? structuredClone(puzzle) : undefined,
+    };
+    setSavedBoards((items) => [item, ...items]);
+    setSelectedBoardId(item.id);
+    setLibraryName("");
+    setNotice(`“${name}”已保存：${boardStats(item.walls, item.beads, item.rotations).panelCount} 块插板。`);
+  }
+
+  function saveGeneratedSolutions() {
+    const candidates = solutions.length > 0 ? solutions : puzzle ? [puzzle] : [];
+    if (candidates.length === 0) {
+      setNotice("当前还没有系统生成的解，请先生成解。");
+      return;
+    }
+    const baseName = libraryName.trim();
+    const created = candidates.map((solution, index): SavedBoard => ({
+      id: newLibraryId("solution"),
+      name: `${baseName ? `${baseName} · ` : ""}${index === 0 ? "最少挡板" : `独立解${index}`}`,
+      kind: "generated",
+      savedAt: new Date().toISOString(),
+      size: solution.size,
+      beads: structuredClone(solution.beads),
+      rotations: [...solution.rotations],
+      walls: cloneWalls(solution.referenceWalls),
+      puzzle: structuredClone(solution),
+    }));
+    setSavedBoards((items) => [...created, ...items]);
+    setSelectedBoardId(created[0].id);
+    setLibraryName("");
+    setNotice(`已将 ${created.length} 套系统解保存到本机盘面库，可逐一载入预览。`);
+  }
+
+  function loadSavedBoard() {
+    const item = selectedSavedBoard;
+    if (!item) {
+      setNotice("请先从盘面与解的下拉框选择一项。");
+      return;
+    }
+    const nextBeads = structuredClone(item.beads);
+    const nextPuzzle = item.puzzle ? structuredClone(item.puzzle) : null;
+    setSize(item.size);
+    setBeads(nextBeads);
+    setActiveColor(nextBeads[0]?.color ?? "red");
+    setTurnCount(item.rotations.length);
+    setPlannedRotations([...item.rotations]);
+    setPuzzle(nextPuzzle);
+    setSolutions(nextPuzzle ? [nextPuzzle] : []);
+    setWalls(cloneWalls(item.walls));
+    setUndoStack([]);
+    setSource(item.kind === "generated" && nextPuzzle ? "reference" : "answer");
+    setSetupMode("walls");
+    setRound(0);
+    setPlaying(false);
+    setDisplayAngle(0);
+    setDisplayPositions(positionsFromBeads(nextBeads));
+    setValidation(null);
+    setNotice(`已载入“${item.name}”；点击播放即可查看逐轮掉落。`);
+  }
+
+  function deleteSavedBoard() {
+    if (!selectedSavedBoard) return;
+    setSavedBoards((items) => items.filter((item) => item.id !== selectedSavedBoard.id));
+    setSelectedBoardId("");
+    setNotice(`已从本机盘面库删除“${selectedSavedBoard.name}”。`);
+  }
+
   function importPuzzle(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -830,6 +1083,53 @@ export default function Home() {
       <div className="workspace">
         <aside className="control-panel">
           <div className="panel-heading"><span className="step-number">01</span><div><p className="section-kicker">自定义条件</p><h2>珠子、盘面与目标</h2></div></div>
+
+          <section className="library-card" aria-label="本机题目与盘面库">
+            <div className="library-heading">
+              <div><span className="field-label">本机题库</span><small>保存在当前浏览器，不需要登录</small></div>
+              <input
+                aria-label="新保存项名称"
+                value={libraryName}
+                maxLength={28}
+                placeholder="名称（可选）"
+                onChange={(event) => setLibraryName(event.target.value)}
+              />
+            </div>
+            <div className="library-row">
+              <select aria-label="选择已保存题目" value={selectedQuestionId} onChange={(event) => setSelectedQuestionId(event.target.value)}>
+                <option value="">选择题目…</option>
+                {savedQuestions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+              <button type="button" onClick={loadSavedQuestion} disabled={!selectedQuestionId}>载入</button>
+              <button type="button" className="danger-lite" onClick={deleteSavedQuestion} disabled={!selectedQuestionId}>删除</button>
+            </div>
+            <button type="button" className="library-save" onClick={saveCurrentQuestion}>＋ 保存当前题目</button>
+
+            <div className="library-divider" />
+            <div className="library-row">
+              <select aria-label="选择已保存作答盘面或系统解" value={selectedBoardId} onChange={(event) => setSelectedBoardId(event.target.value)}>
+                <option value="">选择作答盘面或系统解…</option>
+                {savedBoards.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.kind === "generated" ? "系统解" : "作答"} · {item.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={loadSavedBoard} disabled={!selectedBoardId}>预览</button>
+              <button type="button" className="danger-lite" onClick={deleteSavedBoard} disabled={!selectedBoardId}>删除</button>
+            </div>
+            {selectedSavedBoard && selectedSavedBoardStats && (
+              <div className="saved-preview">
+                <strong>{selectedSavedBoard.name}</strong>
+                <span>{selectedSavedBoardStats.panelCount} 块插板 · {selectedSavedBoardStats.completed ? `${selectedSavedBoardStats.completionRound} 轮完成` : `已掉 ${selectedSavedBoardStats.dropCount}/${selectedSavedBoard.beads.length} 珠`}</span>
+                <small>{dropEventText(selectedSavedBoardStats.events)}</small>
+              </div>
+            )}
+            <div className="library-actions">
+              <button type="button" className="library-save" onClick={saveAnswerBoard}>保存作答盘面</button>
+              <button type="button" className="library-save" onClick={saveGeneratedSolutions} disabled={!puzzle}>保存全部系统解</button>
+            </div>
+          </section>
 
           <section className="control-section compact-settings">
             <label><span className="field-label">盘面大小</span><div className="number-unit"><input aria-label="盘面大小" type="number" min={5} max={16} value={size} disabled={Boolean(puzzle)} onChange={(event) => updateSize(Number(event.target.value))} /><span>× {size}</span></div></label>
@@ -930,7 +1230,10 @@ export default function Home() {
         <section className="board-panel">
           <div className="board-toolbar">
             <div><p className="section-kicker">{puzzle ? "绘制与验证" : setupMode === "start" ? "自由放置起点" : setupMode === "exit" ? "设置共用出口" : "自由放挡板试玩"}</p><h2>{puzzle ? source === "answer" ? "你的迷宫" : "参考迷宫" : `${size}×${size} 自定义盘面`}</h2></div>
-            {puzzle && <div className="source-switch"><button className={source === "answer" ? "selected" : ""} onClick={() => { setSource("answer"); setRound(0); }}>我的答案</button><button className={source === "reference" ? "selected" : ""} onClick={() => { setSource("reference"); setRound(0); }}>查看参考</button></div>}
+            <div className="board-toolbar-actions">
+              <div className="board-stat-pill"><span>当前插板</span><strong>{currentStats.panelCount}</strong><small>块</small></div>
+              {puzzle && <div className="source-switch"><button className={source === "answer" ? "selected" : ""} onClick={() => { setSource("answer"); setRound(0); }}>我的答案</button><button className={source === "reference" ? "selected" : ""} onClick={() => { setSource("reference"); setRound(0); }}>查看参考</button></div>}
+            </div>
           </div>
 
           {!puzzle && setupMode === "walls" && <div className="drawing-tools"><div className="toggle-wall-hint">单击网格线放置挡板，再点一次取消</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>清空内墙</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
@@ -958,6 +1261,15 @@ export default function Home() {
         <aside className="sequence-panel">
           <div className="panel-heading compact"><span className="step-number">02</span><div><p className="section-kicker">旋转序列</p><h2>逐步回放</h2></div></div>
           <div className="timeline-summary"><div><span>当前回合</span><strong>{round}<small> / {playbackTurnCount}</small></strong></div><div><span>盘面重力</span><strong>{gravityLabel[currentFrame.gravity]}</strong></div></div>
+          <div className="playback-stats" aria-label="当前盘面统计">
+            <div><span>插板</span><strong>{currentStats.panelCount}</strong><small>块</small></div>
+            <div><span>掉落</span><strong>{currentStats.dropCount}</strong><small> / {playbackBeads.length} 珠</small></div>
+            <div><span>完成</span><strong>{currentStats.completed ? currentStats.completionRound : "—"}</strong><small>{currentStats.completed ? "轮" : "未完成"}</small></div>
+          </div>
+          <div className="drop-event-summary">
+            <span>逐轮掉落</span>
+            <p>{dropEventText(currentStats.events)}</p>
+          </div>
           <div className={`rotation-list ${puzzle ? "" : "rotation-editor"}`} aria-label={puzzle ? "完整旋转序列" : "逐轮顺逆设置"}>
             {activeRotations.map((rotation, index) => {
               const eventColors = frames[index + 1]?.dropped ?? [];
@@ -967,7 +1279,9 @@ export default function Home() {
                   aria-label={`${eventColors.map((color) => `${COLOR_LABEL[color]}珠`).join("、")}掉落`}
                 >
                   {eventColors.map((color) => (
-                    <i key={color} className={`event-dot ${color}`} title={`${COLOR_LABEL[color]}珠掉落`} />
+                    <i key={color} className={`event-dot ${color}`} title={`${COLOR_LABEL[color]}珠掉落`}>
+                      {COLOR_LABEL[color]}
+                    </i>
                   ))}
                 </span>
               );
