@@ -137,6 +137,21 @@ export function cloneWalls(walls: WallGrid): WallGrid {
   return { h: walls.h.map((row) => [...row]), v: walls.v.map((row) => [...row]) };
 }
 
+export function syncBeadSupportWalls(
+  walls: WallGrid,
+  previousBeads: BeadConfig[],
+  nextBeads: BeadConfig[],
+): WallGrid {
+  const next = cloneWalls(walls);
+  previousBeads.forEach((bead) => {
+    next.h[bead.start.r + 1][bead.start.c] = false;
+  });
+  nextBeads.forEach((bead) => {
+    next.h[bead.start.r + 1][bead.start.c] = true;
+  });
+  return next;
+}
+
 export function boundaryDirections(cell: Cell, size: number): Direction[] {
   const result: Direction[] = [];
   if (cell.r === 0) result.push("up");

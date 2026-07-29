@@ -21,6 +21,7 @@ import {
   resizeBeads,
   sharedTrunkCells,
   simulateWalls,
+  syncBeadSupportWalls,
   validateAnswer,
 } from "./maze";
 
@@ -41,6 +42,7 @@ type SavedQuestion = {
   puzzle?: Puzzle;
   solutions?: Puzzle[];
   selectedSolutionIndex?: number;
+  answers: SavedBoard[];
 };
 
 type SavedBoard = {
@@ -65,6 +67,7 @@ type BoardStats = {
 
 const QUESTION_LIBRARY_KEY = "旋转之后_v5_题目库";
 const BOARD_LIBRARY_KEY = "旋转之后_v5_盘面库";
+const SHARE_HASH_PREFIX = "#share=";
 
 const gravityLabel = { up: "向上", right: "向右", down: "向下", left: "向左" };
 const directionLabel = { up: "上", right: "右", down: "下", left: "左" };
@@ -88,6 +91,113 @@ function newLibraryId(prefix: string) {
 
 function defaultLibraryName(prefix: string, nextIndex: number) {
   return `${prefix} ${nextIndex}`;
+}
+
+function questionFingerprint(value: Pick<SavedQuestion | SavedBoard, "size" | "beads" | "rotations">) {
+  return JSON.stringify({
+    size: value.size,
+    beads: value.beads.map((bead) => ({
+      color: bead.color,
+      start: bead.start,
+      exit: bead.exit,
+    })),
+    rotations: value.rotations,
+  });
+}
+
+function normalizeSavedLibraries(rawQuestions: unknown, rawBoards: unknown): SavedQuestion[] {
+  const questions = (Array.isArray(rawQuestions) ? rawQuestions : [])
+    .filter((item): item is SavedQuestion => Boolean(item && typeof item === "object"))
+    .map((item) => ({
+      ...item,
+      answers: Array.isArray(item.answers) ? item.answers : [],
+    }));
+  const legacyBoards = (Array.isArray(rawBoards) ? rawBoards : [])
+    .filter((item): item is SavedBoard => Boolean(item && typeof item === "object"));
+  if (legacyBoards.length === 0) return questions;
+
+  const migrated = questions.map((item) => ({ ...item, answers: [...item.answers] }));
+  legacyBoards.forEach((board, index) => {
+    const fingerprint = questionFingerprint(board);
+    let target = migrated.find((question) => questionFingerprint(question) === fingerprint);
+    if (!target && migrated.length === 1) target = migrated[0];
+    if (!target) {
+      target = {
+        id: newLibraryId("question"),
+        name: `旧题目 ${index + 1}`,
+        savedAt: board.savedAt ?? new Date().toISOString(),
+        size: board.size,
+        beads: structuredClone(board.beads),
+        turnCount: board.rotations.length,
+        rotations: [...board.rotations],
+        puzzle: board.puzzle ? structuredClone(board.puzzle) : undefined,
+        solutions: board.puzzle ? [structuredClone(board.puzzle)] : undefined,
+        selectedSolutionIndex: board.puzzle ? 0 : undefined,
+        answers: [],
+      };
+      migrated.push(target);
+    }
+    if (!target.answers.some((answer) => answer.id === board.id)) target.answers.push(board);
+  });
+  return migrated;
+}
+
+function bytesToBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value: string) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function encodeSharedQuestion(question: SavedQuestion) {
+  const source = new TextEncoder().encode(JSON.stringify(question));
+  if ("CompressionStream" in window) {
+    const compressed = await new Response(
+      new Blob([source]).stream().pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer();
+    return `g.${bytesToBase64Url(new Uint8Array(compressed))}`;
+  }
+  return `j.${bytesToBase64Url(source)}`;
+}
+
+async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
+  if (token.length > 240_000) throw new Error("分享数据过大");
+  const [format, payload] = token.split(".", 2);
+  let bytes = base64UrlToBytes(payload);
+  if (format === "g") {
+    if (!("DecompressionStream" in window)) throw new Error("浏览器不支持解压");
+    const decompressed = await new Response(
+      new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip")),
+    ).arrayBuffer();
+    bytes = new Uint8Array(decompressed);
+  } else if (format !== "j") {
+    throw new Error("未知分享格式");
+  }
+  const item = JSON.parse(new TextDecoder().decode(bytes)) as SavedQuestion;
+  if (
+    !item
+    || typeof item.name !== "string"
+    || !Number.isInteger(item.size)
+    || item.size < 5
+    || item.size > 16
+    || !Array.isArray(item.beads)
+    || item.beads.length !== ALL_COLORS.length
+    || !Array.isArray(item.rotations)
+    || item.rotations.length < 1
+    || item.rotations.length > 30
+  ) throw new Error("分享内容无效");
+  return {
+    ...item,
+    id: `shared-${token.slice(-24)}`,
+    answers: Array.isArray(item.answers) ? item.answers.slice(0, 50) : [],
+  };
 }
 
 function boardStats(walls: WallGrid, beads: BeadConfig[], rotations: Rotation[]): BoardStats {
@@ -426,11 +536,12 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const lastAnimatedRound = useRef(0);
   const generationWorker = useRef<Worker | null>(null);
+  const beadsRef = useRef(beads);
   const [savedQuestions, setSavedQuestions] = useState<SavedQuestion[]>([]);
-  const [savedBoards, setSavedBoards] = useState<SavedBoard[]>([]);
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [selectedBoardId, setSelectedBoardId] = useState("");
-  const [libraryName, setLibraryName] = useState("");
+  const [questionName, setQuestionName] = useState("");
+  const [answerName, setAnswerName] = useState("");
   const [storageReady, setStorageReady] = useState(false);
 
   const activeBead = beads.find((bead) => bead.color === activeColor) ?? beads[0];
@@ -447,7 +558,9 @@ export default function Home() {
     () => boardStats(displayedWalls, playbackBeads, activeRotations),
     [activeRotations, displayedWalls, playbackBeads],
   );
-  const selectedSavedBoard = savedBoards.find((item) => item.id === selectedBoardId) ?? null;
+  const selectedSavedQuestion = savedQuestions.find((item) => item.id === selectedQuestionId) ?? null;
+  const relatedSavedBoards = selectedSavedQuestion?.answers ?? [];
+  const selectedSavedBoard = relatedSavedBoards.find((item) => item.id === selectedBoardId) ?? null;
   const selectedSavedBoardStats = useMemo(
     () => selectedSavedBoard
       ? boardStats(selectedSavedBoard.walls, selectedSavedBoard.beads, selectedSavedBoard.rotations)
@@ -456,18 +569,35 @@ export default function Home() {
   );
 
   useEffect(() => () => generationWorker.current?.terminate(), []);
+  useEffect(() => {
+    beadsRef.current = beads;
+  }, [beads]);
 
   useEffect(() => {
-    try {
-      const questions = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_KEY) ?? "[]");
-      const boards = JSON.parse(window.localStorage.getItem(BOARD_LIBRARY_KEY) ?? "[]");
-      if (Array.isArray(questions)) setSavedQuestions(questions);
-      if (Array.isArray(boards)) setSavedBoards(boards);
-    } catch {
-      setNotice("本机题库读取失败；仍可继续使用程序并通过 JSON 文件保存。");
-    } finally {
-      setStorageReady(true);
-    }
+    void (async () => {
+      try {
+        const questions = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_KEY) ?? "[]");
+        const boards = JSON.parse(window.localStorage.getItem(BOARD_LIBRARY_KEY) ?? "[]");
+        let normalized = normalizeSavedLibraries(questions, boards);
+        if (window.location.hash.startsWith(SHARE_HASH_PREFIX)) {
+          const token = window.location.hash.slice(SHARE_HASH_PREFIX.length);
+          const shared = await decodeSharedQuestion(token);
+          const existing = normalized.find((item) => item.id === shared.id);
+          normalized = existing
+            ? normalized.map((item) => item.id === shared.id ? shared : item)
+            : [shared, ...normalized];
+          setSelectedQuestionId(shared.id);
+          setQuestionName(shared.name);
+          applySavedQuestion(shared);
+          setNotice(`已从分享链接载入“${shared.name}”及其 ${shared.answers.length} 个解。`);
+        }
+        setSavedQuestions(normalized);
+      } catch {
+        setNotice("题库或分享链接读取失败；仍可继续使用程序并重新保存。");
+      } finally {
+        setStorageReady(true);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -475,18 +605,11 @@ export default function Home() {
     try {
       window.localStorage.setItem(QUESTION_LIBRARY_KEY, JSON.stringify(savedQuestions));
     } catch {
-      setNotice("本机题库空间不足，请删除不需要的保存项或使用 JSON 文件保存。");
+      window.setTimeout(() => {
+        setNotice("本机题库空间不足，请删除不需要的保存项或使用 JSON 文件保存。");
+      }, 0);
     }
   }, [savedQuestions, storageReady]);
-
-  useEffect(() => {
-    if (!storageReady) return;
-    try {
-      window.localStorage.setItem(BOARD_LIBRARY_KEY, JSON.stringify(savedBoards));
-    } catch {
-      setNotice("本机盘面库空间不足，请删除不需要的保存项。");
-    }
-  }, [savedBoards, storageReady]);
 
   useEffect(() => {
     if (!playing) return;
@@ -598,24 +721,21 @@ export default function Home() {
     setValidation(null);
   }
 
-  function updateBead(color: Color, updater: (bead: BeadConfig) => BeadConfig) {
-    setBeads((value) => value.map((bead) => bead.color === color ? updater(bead) : bead));
-  }
-
   function chooseStartForColor(color: Color, row: number, col: number) {
     if (puzzle || setupMode !== "start") return;
-    const occupied = beads.find((bead) => bead.color !== color && bead.start.r === row && bead.start.c === col);
+    const currentBeads = beadsRef.current;
+    const occupied = currentBeads.find((bead) => bead.color !== color && bead.start.r === row && bead.start.c === col);
     if (occupied) {
       setNotice(`${COLOR_LABEL[occupied.color]}珠已经占用这个格子。`);
       return;
     }
+    const movedBeads = currentBeads.map((bead) => (
+      bead.color === color ? { ...bead, start: { r: row, c: col } } : bead
+    ));
     setActiveColor(color);
-    updateBead(color, (bead) => ({ ...bead, start: { r: row, c: col } }));
-    setWalls((current) => {
-      const next = cloneWalls(current);
-      next.h[row + 1][col] = true;
-      return next;
-    });
+    beadsRef.current = movedBeads;
+    setBeads(movedBeads);
+    setWalls((current) => syncBeadSupportWalls(current, currentBeads, movedBeads));
     setDisplayPositions((current) => ({ ...current, [color]: { r: row, c: col } }));
     setRound(0);
     setPlaying(false);
@@ -883,10 +1003,9 @@ export default function Home() {
     setValidation(null);
   }
 
-  function saveCurrentQuestion() {
-    const name = libraryName.trim() || defaultLibraryName("题目", savedQuestions.length + 1);
-    const item: SavedQuestion = {
-      id: newLibraryId("question"),
+  function makeQuestionSnapshot(name: string, id = newLibraryId("question"), answers: SavedBoard[] = []): SavedQuestion {
+    return {
+      id,
       name,
       savedAt: new Date().toISOString(),
       size,
@@ -896,19 +1015,34 @@ export default function Home() {
       puzzle: puzzle ? structuredClone(puzzle) : undefined,
       solutions: solutions.length > 0 ? structuredClone(solutions) : undefined,
       selectedSolutionIndex: puzzle ? Math.max(0, solutions.indexOf(puzzle)) : undefined,
+      answers,
     };
-    setSavedQuestions((items) => [item, ...items]);
-    setSelectedQuestionId(item.id);
-    setLibraryName("");
-    setNotice(`“${name}”已保存到本机题库，可从下拉框随时载入。`);
   }
 
-  function loadSavedQuestion() {
-    const item = savedQuestions.find((question) => question.id === selectedQuestionId);
-    if (!item) {
-      setNotice("请先从题目下拉框选择一项。");
+  function saveCurrentQuestion() {
+    const name = questionName.trim() || defaultLibraryName("题目", savedQuestions.length + 1);
+    const item = makeQuestionSnapshot(name);
+    setSavedQuestions((items) => [item, ...items]);
+    setSelectedQuestionId(item.id);
+    setSelectedBoardId("");
+    setQuestionName(item.name);
+    setAnswerName("");
+    setNotice(`“${name}”已保存；现在可以把作答盘面和系统解保存到这道题下面。`);
+  }
+
+  function updateCurrentQuestion() {
+    if (!selectedSavedQuestion) {
+      setNotice("请先选择要更新的题目。");
       return;
     }
+    const name = questionName.trim() || selectedSavedQuestion.name;
+    const updated = makeQuestionSnapshot(name, selectedSavedQuestion.id, selectedSavedQuestion.answers);
+    setSavedQuestions((items) => items.map((item) => item.id === updated.id ? updated : item));
+    setQuestionName(updated.name);
+    setNotice(`已更新题目“${updated.name}”，它名下的 ${updated.answers.length} 个解已保留。`);
+  }
+
+  function applySavedQuestion(item: SavedQuestion) {
     const nextBeads = structuredClone(item.beads);
     const nextSolutions = item.solutions?.length ? structuredClone(item.solutions) : [];
     const nextPuzzle = nextSolutions.length > 0
@@ -930,6 +1064,18 @@ export default function Home() {
     setDisplayAngle(0);
     setDisplayPositions(positionsFromBeads(nextBeads));
     setValidation(null);
+  }
+
+  function loadSavedQuestion() {
+    const item = savedQuestions.find((question) => question.id === selectedQuestionId);
+    if (!item) {
+      setNotice("请先从题目下拉框选择一项。");
+      return;
+    }
+    applySavedQuestion(item);
+    setQuestionName(item.name);
+    setSelectedBoardId("");
+    setAnswerName("");
     setNotice(`已载入题目“${item.name}”，作答盘面已重置。`);
   }
 
@@ -938,11 +1084,18 @@ export default function Home() {
     if (!item) return;
     setSavedQuestions((items) => items.filter((question) => question.id !== item.id));
     setSelectedQuestionId("");
-    setNotice(`已从本机题库删除“${item.name}”。`);
+    setSelectedBoardId("");
+    setQuestionName("");
+    setAnswerName("");
+    setNotice(`已删除题目“${item.name}”及其 ${item.answers.length} 个关联解。`);
   }
 
   function saveAnswerBoard() {
-    const name = libraryName.trim() || defaultLibraryName("作答盘面", savedBoards.length + 1);
+    if (!selectedSavedQuestion) {
+      setNotice("请先保存或选择一道题，再保存这道题的作答盘面。");
+      return;
+    }
+    const name = answerName.trim() || defaultLibraryName("作答方案", relatedSavedBoards.length + 1);
     const item: SavedBoard = {
       id: newLibraryId("board"),
       name,
@@ -954,22 +1107,30 @@ export default function Home() {
       walls: cloneWalls(walls),
       puzzle: puzzle ? structuredClone(puzzle) : undefined,
     };
-    setSavedBoards((items) => [item, ...items]);
+    setSavedQuestions((items) => items.map((question) => (
+      question.id === selectedSavedQuestion.id
+        ? { ...question, answers: [item, ...question.answers] }
+        : question
+    )));
     setSelectedBoardId(item.id);
-    setLibraryName("");
-    setNotice(`“${name}”已保存：${boardStats(item.walls, item.beads, item.rotations).panelCount} 块插板。`);
+    setAnswerName(item.name);
+    setNotice(`“${name}”已保存到题目“${selectedSavedQuestion.name}”：${boardStats(item.walls, item.beads, item.rotations).panelCount} 块插板。`);
   }
 
   function saveGeneratedSolutions() {
+    if (!selectedSavedQuestion) {
+      setNotice("请先保存或选择一道题，再保存它的系统解。");
+      return;
+    }
     const candidates = solutions.length > 0 ? solutions : puzzle ? [puzzle] : [];
     if (candidates.length === 0) {
       setNotice("当前还没有系统生成的解，请先生成解。");
       return;
     }
-    const baseName = libraryName.trim();
+    const baseName = answerName.trim() || "系统解";
     const created = candidates.map((solution, index): SavedBoard => ({
       id: newLibraryId("solution"),
-      name: `${baseName ? `${baseName} · ` : ""}${index === 0 ? "最少挡板" : `独立解${index}`}`,
+      name: `${baseName} · ${index === 0 ? "最少挡板" : `独立解 ${index}`}`,
       kind: "generated",
       savedAt: new Date().toISOString(),
       size: solution.size,
@@ -978,10 +1139,34 @@ export default function Home() {
       walls: cloneWalls(solution.referenceWalls),
       puzzle: structuredClone(solution),
     }));
-    setSavedBoards((items) => [...created, ...items]);
+    setSavedQuestions((items) => items.map((question) => (
+      question.id === selectedSavedQuestion.id
+        ? { ...question, answers: [...created, ...question.answers] }
+        : question
+    )));
     setSelectedBoardId(created[0].id);
-    setLibraryName("");
-    setNotice(`已将 ${created.length} 套系统解保存到本机盘面库，可逐一载入预览。`);
+    setAnswerName(created[0].name);
+    setNotice(`已将 ${created.length} 套命名系统解保存到题目“${selectedSavedQuestion.name}”。`);
+  }
+
+  function renameSavedBoard() {
+    if (!selectedSavedQuestion || !selectedSavedBoard) return;
+    const name = answerName.trim();
+    if (!name) {
+      setNotice("请输入新的解名称。");
+      return;
+    }
+    setSavedQuestions((items) => items.map((question) => (
+      question.id === selectedSavedQuestion.id
+        ? {
+          ...question,
+          answers: question.answers.map((answer) => (
+            answer.id === selectedSavedBoard.id ? { ...answer, name } : answer
+          )),
+        }
+        : question
+    )));
+    setNotice(`解已改名为“${name}”。`);
   }
 
   function loadSavedBoard() {
@@ -1012,10 +1197,41 @@ export default function Home() {
   }
 
   function deleteSavedBoard() {
-    if (!selectedSavedBoard) return;
-    setSavedBoards((items) => items.filter((item) => item.id !== selectedSavedBoard.id));
+    if (!selectedSavedQuestion || !selectedSavedBoard) return;
+    setSavedQuestions((items) => items.map((question) => (
+      question.id === selectedSavedQuestion.id
+        ? { ...question, answers: question.answers.filter((item) => item.id !== selectedSavedBoard.id) }
+        : question
+    )));
     setSelectedBoardId("");
-    setNotice(`已从本机盘面库删除“${selectedSavedBoard.name}”。`);
+    setAnswerName("");
+    setNotice(`已从题目“${selectedSavedQuestion.name}”删除解“${selectedSavedBoard.name}”。`);
+  }
+
+  async function shareSelectedQuestion() {
+    if (!selectedSavedQuestion) {
+      setNotice("请先选择要分享的题目。");
+      return;
+    }
+    try {
+      const token = await encodeSharedQuestion(selectedSavedQuestion);
+      const url = `${window.location.origin}${window.location.pathname}${SHARE_HASH_PREFIX}${token}`;
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        const input = document.createElement("textarea");
+        input.value = url;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+      setNotice(`分享链接已复制：别人打开即可看到“${selectedSavedQuestion.name}”及其 ${selectedSavedQuestion.answers.length} 个解。`);
+    } catch {
+      setNotice("生成分享链接失败，请减少这道题保存的解数量后重试。");
+    }
   }
 
   function importPuzzle(event: ChangeEvent<HTMLInputElement>) {
@@ -1084,32 +1300,71 @@ export default function Home() {
         <aside className="control-panel">
           <div className="panel-heading"><span className="step-number">01</span><div><p className="section-kicker">自定义条件</p><h2>珠子、盘面与目标</h2></div></div>
 
-          <section className="library-card" aria-label="本机题目与盘面库">
+          <section className="library-card" aria-label="题目与对应解">
             <div className="library-heading">
-              <div><span className="field-label">本机题库</span><small>保存在当前浏览器，不需要登录</small></div>
-              <input
-                aria-label="新保存项名称"
-                value={libraryName}
-                maxLength={28}
-                placeholder="名称（可选）"
-                onChange={(event) => setLibraryName(event.target.value)}
-              />
+              <div><span className="field-label">题目 → 多个命名解</span><small>先选题目，下方只显示这道题的解</small></div>
             </div>
+            <input
+              className="library-name-input"
+              aria-label="题目名称"
+              value={questionName}
+              maxLength={28}
+              placeholder="题目名称"
+              onChange={(event) => setQuestionName(event.target.value)}
+            />
             <div className="library-row">
-              <select aria-label="选择已保存题目" value={selectedQuestionId} onChange={(event) => setSelectedQuestionId(event.target.value)}>
+              <select
+                aria-label="选择已保存题目"
+                value={selectedQuestionId}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const item = savedQuestions.find((question) => question.id === id);
+                  setSelectedQuestionId(id);
+                  setSelectedBoardId("");
+                  setQuestionName(item?.name ?? "");
+                  setAnswerName("");
+                }}
+              >
                 <option value="">选择题目…</option>
-                {savedQuestions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                {savedQuestions.map((item) => <option key={item.id} value={item.id}>{item.name}（{item.answers.length} 解）</option>)}
               </select>
               <button type="button" onClick={loadSavedQuestion} disabled={!selectedQuestionId}>载入</button>
               <button type="button" className="danger-lite" onClick={deleteSavedQuestion} disabled={!selectedQuestionId}>删除</button>
             </div>
-            <button type="button" className="library-save" onClick={saveCurrentQuestion}>＋ 保存当前题目</button>
+            <div className="library-actions three">
+              <button type="button" className="library-save" onClick={saveCurrentQuestion}>另存新题</button>
+              <button type="button" className="library-save" onClick={updateCurrentQuestion} disabled={!selectedQuestionId}>更新当前题</button>
+              <button type="button" className="library-save share-button" onClick={shareSelectedQuestion} disabled={!selectedQuestionId}>复制分享链接</button>
+            </div>
 
             <div className="library-divider" />
+            <div className="library-subheading">
+              <strong>{selectedSavedQuestion ? `“${selectedSavedQuestion.name}”的解` : "请先选择题目"}</strong>
+              <span>{relatedSavedBoards.length} 个</span>
+            </div>
+            <input
+              className="library-name-input"
+              aria-label="解名称"
+              value={answerName}
+              maxLength={32}
+              placeholder="解名称（可保存或改名）"
+              disabled={!selectedSavedQuestion}
+              onChange={(event) => setAnswerName(event.target.value)}
+            />
             <div className="library-row">
-              <select aria-label="选择已保存作答盘面或系统解" value={selectedBoardId} onChange={(event) => setSelectedBoardId(event.target.value)}>
-                <option value="">选择作答盘面或系统解…</option>
-                {savedBoards.map((item) => (
+              <select
+                aria-label="选择当前题目的已保存解"
+                value={selectedBoardId}
+                disabled={!selectedSavedQuestion}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const item = relatedSavedBoards.find((answer) => answer.id === id);
+                  setSelectedBoardId(id);
+                  setAnswerName(item?.name ?? "");
+                }}
+              >
+                <option value="">{selectedSavedQuestion ? "选择这道题的解…" : "请先选择题目"}</option>
+                {relatedSavedBoards.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.kind === "generated" ? "系统解" : "作答"} · {item.name}
                   </option>
@@ -1126,9 +1381,11 @@ export default function Home() {
               </div>
             )}
             <div className="library-actions">
-              <button type="button" className="library-save" onClick={saveAnswerBoard}>保存作答盘面</button>
-              <button type="button" className="library-save" onClick={saveGeneratedSolutions} disabled={!puzzle}>保存全部系统解</button>
+              <button type="button" className="library-save" onClick={saveAnswerBoard} disabled={!selectedSavedQuestion}>保存当前作答</button>
+              <button type="button" className="library-save" onClick={saveGeneratedSolutions} disabled={!selectedSavedQuestion || !puzzle}>保存全部系统解</button>
             </div>
+            <button type="button" className="library-save" onClick={renameSavedBoard} disabled={!selectedSavedBoard || !answerName.trim()}>用上方名称改名</button>
+            <small className="share-help">普通网址只含程序；“复制分享链接”会把所选题目及其全部解一起带给别人。</small>
           </section>
 
           <section className="control-section compact-settings">
