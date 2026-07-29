@@ -1162,6 +1162,7 @@ export function generateAutomaticPuzzle(
   fixedRotations?: Rotation[],
   forbiddenWallKeys: string[] = [],
   initialWalls?: WallGrid,
+  completionTurnLimit = maximumTurns,
 ): Puzzle | null {
   if (!allBeadsShareExit(beads) || order.length !== beads.length) return null;
   if (fixedRotations && forbiddenWallKeys.length === 0 && !initialWalls) {
@@ -1172,7 +1173,7 @@ export function generateAutomaticPuzzle(
       fixedRotations,
       Math.max(220, Math.ceil(attempts / 4)),
     );
-    if (constructed) return constructed;
+    if (constructed && constructed.turnCount <= completionTurnLimit) return constructed;
   }
   const settledPuzzle = generateSettledGravityPuzzle(
     size,
@@ -1184,6 +1185,7 @@ export function generateAutomaticPuzzle(
     fixedRotations,
     forbiddenWallKeys,
     initialWalls,
+    completionTurnLimit,
   );
   if (settledPuzzle) return settledPuzzle;
   if (fixedRotations) return null;
@@ -1198,7 +1200,7 @@ export function generateAutomaticPuzzle(
     if (!paths) { rejected.track += 1; continue; }
     const referenceWalls = pathsToWalls(size, paths);
     const sequence = searchAutomaticRotationSequence(referenceWalls, beads, order, maximumTurns);
-    if (!sequence) { rejected.sequence += 1; continue; }
+    if (!sequence || sequence.rotations.length > completionTurnLimit) { rejected.sequence += 1; continue; }
     const puzzle: Puzzle = {
       rulesVersion: 3,
       size,
@@ -1329,6 +1331,42 @@ function settledRotationCandidate(
   return result.length > 0 ? result : null;
 }
 
+function canReachOrientation(q: number, target: number, turns: number): boolean {
+  for (let clockwise = 0; clockwise <= turns; clockwise += 1) {
+    const counterclockwise = turns - clockwise;
+    if ((q + clockwise - counterclockwise + turns * 4) % 4 === target) return true;
+  }
+  return false;
+}
+
+function compactRotationCandidate(
+  exitDirection: Direction,
+  turns: number,
+  variant: number,
+): Rotation[] | null {
+  if (turns < 1) return null;
+  const target = orientationForDirection(exitDirection);
+  const result: Rotation[] = [];
+  let q = 0;
+  for (let round = 0; round < turns; round += 1) {
+    const remaining = turns - round - 1;
+    const options = (["cw", "ccw"] as Rotation[])
+      .map((rotation) => ({
+        rotation,
+        q: (q + (rotation === "cw" ? 1 : 3)) % 4,
+      }))
+      .filter((option) => canReachOrientation(option.q, target, remaining))
+      .sort((a, b) =>
+        seededRank(0x5f3759df, variant, round, a.q)
+        - seededRank(0x5f3759df, variant, round, b.q));
+    if (options.length === 0) return null;
+    const selected = options[seededRank(0x27d4eb2d, variant, round) % options.length];
+    result.push(selected.rotation);
+    q = selected.q;
+  }
+  return q === target ? result : null;
+}
+
 export function distinctRotationPatterns(
   exitDirection: Direction,
   maximumTurns: number,
@@ -1337,13 +1375,18 @@ export function distinctRotationPatterns(
 ): Rotation[][] {
   const patterns: Rotation[][] = [];
   const signatures = new Set<string>();
-  for (let variant = 0; variant < 256 && patterns.length < limit; variant += 1) {
-    const pattern = settledRotationCandidate(exitDirection, maximumTurns, variant, opportunityCount);
-    if (!pattern) continue;
-    const signature = pattern.join("|");
-    if (signatures.has(signature)) continue;
-    signatures.add(signature);
-    patterns.push(pattern);
+  for (const factory of [
+    (variant: number) => settledRotationCandidate(exitDirection, maximumTurns, variant, opportunityCount),
+    (variant: number) => compactRotationCandidate(exitDirection, maximumTurns, variant),
+  ]) {
+    for (let variant = 0; variant < 512 && patterns.length < limit; variant += 1) {
+      const pattern = factory(variant);
+      if (!pattern) continue;
+      const signature = pattern.join("|");
+      if (signatures.has(signature)) continue;
+      signatures.add(signature);
+      patterns.push(pattern);
+    }
   }
   return patterns;
 }
@@ -1418,6 +1461,7 @@ function evaluateSettledCandidate(
   beads: BeadConfig[],
   order: Color[],
   rotations: Rotation[],
+  completionTurnLimit: number,
 ): CandidateEvaluation {
   const frames = simulateWalls(walls, beads, rotations);
   const dropSequence = frames.flatMap((frame) => frame.dropped);
@@ -1450,7 +1494,13 @@ function evaluateSettledCandidate(
   const trunkCoverage = beads.reduce((sum, bead) =>
     sum + trunk.filter((cell) => visited.get(bead.color)!.has(key(cell))).length, 0);
   const idle = frames.slice(1).filter((frame) => frame.movementOrder.length === 0 && frame.dropped.length === 0).length;
-  const exact = dropSequence.length === order.length && dropSequence.every((color, index) => color === order[index]);
+  const lastDropRound = frames.reduce(
+    (last, frame) => frame.dropped.length > 0 ? frame.round : last,
+    0,
+  );
+  const exact = dropSequence.length === order.length
+    && dropSequence.every((color, index) => color === order[index])
+    && lastDropRound <= completionTurnLimit;
   const allUseTrunk = beads.every((bead) => trunk.every((cell) => visited.get(bead.color)!.has(key(cell))));
   const focusCells: Cell[] = [];
   if (nextColor) {
@@ -1525,11 +1575,9 @@ function generateSettledGravityPuzzle(
   fixedRotations?: Rotation[],
   forbiddenWallKeys: string[] = [],
   initialWalls?: WallGrid,
+  completionTurnLimit = maximumTurns,
 ): Puzzle | null {
-  const minimumOpportunities = beads.length;
   const target = orientationForDirection(beads[0].exit.direction);
-  const initialTurns = target === 0 ? 0 : target === 2 ? 2 : 1;
-  if (!fixedRotations && maximumTurns < initialTurns + Math.max(0, minimumOpportunities - 1) * 2) return null;
   if (fixedRotations) {
     let orientation = 0;
     const targetOpportunities = fixedRotations.reduce((count, rotation) => {
@@ -1545,7 +1593,12 @@ function generateSettledGravityPuzzle(
     const searchVariant = variant + variantOffset;
     const rotations = fixedRotations
       ? [...fixedRotations]
-      : settledRotationCandidate(beads[0].exit.direction, maximumTurns, searchVariant, beads.length);
+      : settledRotationCandidate(
+        beads[0].exit.direction,
+        maximumTurns,
+        searchVariant,
+        beads.length,
+      );
     const fixedLayout = fixedSettledWalls(size, beads, forbiddenWallKeys);
     if (!rotations || !fixedLayout) return null;
     const random = seededRandom(
@@ -1568,7 +1621,7 @@ function generateSettledGravityPuzzle(
         current[edge.kind][edge.r][edge.c] = random() < density;
       });
     }
-    let currentEval = evaluateSettledCandidate(current, beads, order, rotations);
+    let currentEval = evaluateSettledCandidate(current, beads, order, rotations, completionTurnLimit);
     let best = cloneWalls(current);
     let bestEval = currentEval;
 
@@ -1620,7 +1673,7 @@ function generateSettledGravityPuzzle(
         const edge = pool[Math.floor(random() * pool.length)];
         candidate[edge.kind][edge.r][edge.c] = !candidate[edge.kind][edge.r][edge.c];
       }
-      const candidateEval = evaluateSettledCandidate(candidate, beads, order, rotations);
+      const candidateEval = evaluateSettledCandidate(candidate, beads, order, rotations, completionTurnLimit);
       const temperatureBase = closeToSolved ? 12_000_000 : 2_000_000;
       const temperature = Math.max(2_000, temperatureBase * (1 - iteration / iterationsPerVariant));
       const accept = candidateEval.score >= currentEval.score
@@ -2021,21 +2074,34 @@ export function countInternalPanels(walls: WallGrid): number {
 
 export function minimizePuzzleWalls(puzzle: Puzzle, trials = 8): Puzzle {
   type Edge = { kind: "h" | "v"; r: number; c: number };
-  const baseEdges: Edge[] = [];
+  const allEdges: Edge[] = [];
   for (let r = 1; r < puzzle.size; r += 1) for (let c = 0; c < puzzle.size; c += 1) {
-    if (puzzle.referenceWalls.h[r][c]) baseEdges.push({ kind: "h", r, c });
+    allEdges.push({ kind: "h", r, c });
   }
   for (let r = 0; r < puzzle.size; r += 1) for (let c = 1; c < puzzle.size; c += 1) {
-    if (puzzle.referenceWalls.v[r][c]) baseEdges.push({ kind: "v", r, c });
+    allEdges.push({ kind: "v", r, c });
   }
   let best = cloneWalls(puzzle.referenceWalls);
   let bestCount = countInternalPanels(best);
   for (let trial = 0; trial < Math.max(1, trials); trial += 1) {
-    const candidate = cloneWalls(puzzle.referenceWalls);
+    const perturbedRestart = trial >= Math.ceil(Math.max(1, trials) / 2);
+    const candidate = cloneWalls(perturbedRestart ? best : puzzle.referenceWalls);
+    if (perturbedRestart) {
+      let additions = 1 + trial % 3;
+      for (const edge of shuffled(allEdges)) {
+        if (additions <= 0) break;
+        if (candidate[edge.kind][edge.r][edge.c]) continue;
+        candidate[edge.kind][edge.r][edge.c] = true;
+        const testPuzzle = { ...puzzle, referenceWalls: candidate };
+        if (validateAnswer(testPuzzle, candidate).ok) additions -= 1;
+        else candidate[edge.kind][edge.r][edge.c] = false;
+      }
+    }
     let changed = true;
     while (changed) {
       changed = false;
-      const edges = trial === 0 ? [...baseEdges] : shuffled(baseEdges);
+      const removable = allEdges.filter((edge) => candidate[edge.kind][edge.r][edge.c]);
+      const edges = trial === 0 ? removable : shuffled(removable);
       for (const edge of edges) {
         if (!candidate[edge.kind][edge.r][edge.c]) continue;
         candidate[edge.kind][edge.r][edge.c] = false;

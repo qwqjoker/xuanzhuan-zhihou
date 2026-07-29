@@ -913,7 +913,9 @@ export default function Home() {
       reserved.add(startKey);
       if (reserved.has(exitCellKey) && exitCellKey === startKey) return "珠子起点不能放在共用出口格。";
     }
-    if (turnCount < beads.length) return "旋转次数至少要等于珠子数量。";
+    const horizontalExit = commonExit.direction === "left" || commonExit.direction === "right";
+    const earliestExitRound = horizontalExit ? 1 : 2;
+    if (turnCount < earliestExitRound) return `该出口方向最早要到第 ${earliestExitRound} 轮才可能离场。`;
     return null;
   }
 
@@ -924,29 +926,15 @@ export default function Home() {
     const worker = new Worker(new URL("./maze-worker.ts", import.meta.url), { type: "module" });
     generationWorker.current = worker;
     setBusy(true);
-    setNotice("正在后台生成多套规则解并比较插板数量；可随时取消。");
-    worker.onmessage = (event: MessageEvent<{ type: "progress"; message: string } | { type: "result"; puzzles: Puzzle[] }>) => {
-      if (event.data.type === "progress") {
-        setNotice(event.data.message);
-        return;
-      }
-      const results = event.data.puzzles;
-      worker.terminate();
-      if (generationWorker.current === worker) generationWorker.current = null;
-      if (results.length === 0) {
-        setNotice(`这组起点、共用出口和 ${turnCount} 次上限仍未找到完整解；程序已同时尝试你设置的顺逆序列和自动改排。请移动起点或增加旋转次数。`);
-        setBusy(false);
-        return;
-      }
+    setNotice("正在验证正解；按轮数从少到多搜索，确定最少轮后再比较插板数。");
+    let receivedPartial = false;
+    const showGeneratedResults = (results: Puzzle[]) => {
       const result = results[0];
-      const sequenceAdjusted = result.rotations.some((rotation, index) => rotation !== plannedRotations[index])
-        || result.rotations.length !== plannedRotations.length;
+      if (!result) return;
       setSolutions(results);
       setDisplayPositions(positionsFromBeads(result.beads));
       setDisplayAngle(0);
       lastAnimatedRound.current = 0;
-      setTurnCount(result.turnCount);
-      setPlannedRotations([...result.rotations]);
       setDropTargets({ ...result.dropRounds });
       setPuzzle(result);
       setWalls(makeAnswerWalls(size, result.beads));
@@ -954,16 +942,44 @@ export default function Home() {
       setSource("reference");
       setRound(0);
       setValidation(null);
-      setNotice(sequenceAdjusted
-        ? `原顺逆序列没有完整解，程序已在 ${turnCount} 次上限内自动改排并找到 ${results.length} 套独立解；当前为挡板最少候选（${result.panelCount} 片）。`
-        : `已找到 ${results.length} 套路径不同、互非加板关系的独立解；当前显示挡板最少的方案（${result.panelCount} 片）。`);
+    };
+    worker.onmessage = (event: MessageEvent<
+      | { type: "progress"; message: string }
+      | { type: "partial"; puzzles: Puzzle[]; message: string }
+      | { type: "result"; puzzles: Puzzle[] }
+    >) => {
+      if (event.data.type === "progress") {
+        setNotice(event.data.message);
+        return;
+      }
+      if (event.data.type === "partial") {
+        receivedPartial = true;
+        showGeneratedResults(event.data.puzzles);
+        setNotice(event.data.message);
+        return;
+      }
+      const results = event.data.puzzles;
+      worker.terminate();
+      if (generationWorker.current === worker) generationWorker.current = null;
+      if (results.length === 0) {
+        setNotice(receivedPartial
+          ? "已保留先前找到的正解；后续优化未找到更好的候选。"
+          : `在 ${turnCount} 轮上限内仍未找到完整解；请移动起点或增加旋转上限。`);
+        setBusy(false);
+        return;
+      }
+      const result = results[0];
+      showGeneratedResults(results);
+      setNotice(`最终优化完成：上限 ${turnCount} 内最少 ${result.turnCount} 轮；在同轮正解候选中，当前方案插板最少（${result.panelCount} 片）。`);
       setBusy(false);
     };
     worker.onerror = () => {
       worker.terminate();
       if (generationWorker.current === worker) generationWorker.current = null;
       setBusy(false);
-      setNotice("后台生成器启动失败，请刷新页面后重试。");
+      setNotice(receivedPartial
+        ? "已保留先前找到并显示的正解；后台优化意外停止，可以直接试玩或重新搜索。"
+        : "后台生成器启动失败，请刷新页面后重试。");
     };
     worker.postMessage({
       type: "generate",
@@ -980,13 +996,13 @@ export default function Home() {
     generationWorker.current?.terminate();
     generationWorker.current = null;
     setBusy(false);
-    setNotice("已取消后台搜索，可以继续修改设置。");
+    setNotice(puzzle
+      ? "已停止后台优化；当前已显示的正解会保留，可以立即试玩。"
+      : "已取消后台搜索，可以继续修改设置。");
   }
 
   function selectSolution(next: Puzzle, index: number) {
     setPuzzle(next);
-    setTurnCount(next.turnCount);
-    setPlannedRotations([...next.rotations]);
     setDropTargets({ ...next.dropRounds });
     setDisplayPositions(positionsFromBeads(next.beads));
     setDisplayAngle(0);
@@ -998,15 +1014,11 @@ export default function Home() {
     setPlaying(false);
     setValidation(null);
     setNotice(index === 0
-      ? `已切换到候选中插板最少的方案：${next.panelCount} 片。`
-      : `已切换到独立解 ${index}：${next.panelCount} 片插板，珠子路线与其他方案不同。`);
+      ? `当前最终方案：最少 ${next.turnCount} 轮，并在同轮正解候选中以 ${next.panelCount} 片插板排名第一。`
+      : `已切换到同为 ${next.turnCount} 轮的独立解 ${index}：${next.panelCount} 片插板。`);
   }
 
   function resetSetup() {
-    if (puzzle) {
-      setPlannedRotations([...puzzle.rotations]);
-      setTurnCount(puzzle.rotations.length);
-    }
     setPuzzle(null);
     setSolutions([]);
     setWalls(makeAnswerWalls(size, beads));
@@ -1160,7 +1172,7 @@ export default function Home() {
     const baseName = answerName.trim() || "系统解";
     const created = candidates.map((solution, index): SavedBoard => ({
       id: newLibraryId("solution"),
-      name: `${baseName} · ${index === 0 ? "最少挡板" : `独立解 ${index}`}`,
+      name: `${baseName} · ${index === 0 ? "最少轮·最少挡板" : `同轮独立解 ${index}`}`,
       kind: "generated",
       savedAt: new Date().toISOString(),
       size: solution.size,
@@ -1516,7 +1528,11 @@ export default function Home() {
             </p>
           </section>
 
-          {!puzzle ? <div className="generation-actions"><button className="primary-button" onClick={() => generate(true)} disabled={busy}>{busy ? "正在搜索并比较独立解…" : "生成最少挡板解和独立解"}</button>{busy && <button className="text-button cancel-search" onClick={cancelGeneration}>取消搜索</button>}</div> : <button className="secondary-button full" onClick={resetSetup}>修改全部设置</button>}
+          {!puzzle
+            ? <div className="generation-actions"><button className="primary-button" onClick={() => generate(true)} disabled={busy}>{busy ? "正在先找一套正解…" : "生成正解：先少轮，再少挡板"}</button>{busy && <button className="text-button cancel-search" onClick={cancelGeneration}>取消搜索</button>}</div>
+            : busy
+              ? <button className="secondary-button full" onClick={cancelGeneration}>已显示正解 · 停止后台优化</button>
+              : <button className="secondary-button full" onClick={resetSetup}>修改全部设置</button>}
 
           {puzzle && (
             <section className="puzzle-card">
@@ -1529,7 +1545,7 @@ export default function Home() {
                       className={solution === puzzle ? "selected" : ""}
                       onClick={() => selectSolution(solution, index)}
                     >
-                      <strong>{index === 0 ? "最少挡板" : `独立解 ${index}`}</strong>
+                      <strong>{busy && index === 0 ? "临时正解（优化中）" : index === 0 ? "最少轮·最少挡板" : `同轮独立解 ${index}`}</strong>
                       <span>{solution.panelCount ?? countInternalPanels(solution.referenceWalls)} 片 · {solution.turnCount} 轮</span>
                     </button>
                   ))}
@@ -1539,7 +1555,7 @@ export default function Home() {
               <div className="drop-schedule">
                 {puzzle.order.map((color) => <div key={color}><span className={`mini-ball ${color}`} /><b>{COLOR_LABEL[color]}珠</b><em>第 {puzzle.dropRounds[color]} 次</em></div>)}
               </div>
-              <p className="solution-count">内部插板 <strong>{puzzle.panelCount ?? countInternalPanels(puzzle.referenceWalls)}</strong> 片<span>{puzzle.optimizationTrials ? `经过 ${puzzle.optimizationTrials} 轮删板搜索 · 当前搜索最优` : `已确认至少 ${puzzle.solutionLowerBound} 组规则解`}</span></p>
+              <p className="solution-count">实际完成 <strong>{puzzle.turnCount}</strong> 轮 · 内部插板 <strong>{puzzle.panelCount ?? countInternalPanels(puzzle.referenceWalls)}</strong> 片<span>{busy ? "临时正解，挡板仍在优化；不是最终答案" : "最终排序：正解 → 最少轮 → 同轮最少挡板"}</span></p>
             </section>
           )}
         </aside>
@@ -1639,7 +1655,7 @@ export default function Home() {
 
       {validation && <div className={`validation-toast ${validation.ok ? "success" : "warning"}`}><button className="toast-close" onClick={() => setValidation(null)}>×</button><p className="section-kicker">规则验证</p><h3>{validation.title}</h3><ul>{validation.details.map((detail) => <li key={detail}>{detail}</li>)}</ul>{validation.ok && <button onClick={() => setPlaying(true)}>播放我的答案</button>}</div>}
 
-      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>固定五珠。</b>红、黄、蓝、绿、紫五颗珠子必须按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>必须经过共用主通道。</b>各珠支路可从汇流口的侧面或后方进入；汇流口之后形成连续主通道，并由插板约束到同一出口。</li><li><b>禁止单通道。</b>全部起点与出口必须接入同一共享迷宫，且至少包含一个三向或四向分叉点，不能用五条彼此隔离的通道作答。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>多解与最少挡板。</b>程序生成若干完整规则解并按内部单位挡板数排序；外框不计，删除挡板不得破坏分叉、共用通道和掉落顺序。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
+      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>固定五珠。</b>红、黄、蓝、绿、紫五颗珠子必须按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>必须经过共用主通道。</b>各珠支路可从汇流口的侧面或后方进入；汇流口之后形成连续主通道，并由插板约束到同一出口。</li><li><b>禁止单通道。</b>全部起点与出口必须接入同一共享迷宫，且至少包含一个三向或四向分叉点，不能用五条彼此隔离的通道作答。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>正解、轮数、插板三级排序。</b>程序先验证完整正解，再从理论最早离场轮数开始逐轮搜索；首次找到完整解后，只在这个最短轮数内比较插板数量并生成路线不同的独立解。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
     </main>
   );
 }
