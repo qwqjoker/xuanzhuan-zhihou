@@ -68,6 +68,7 @@ type BoardStats = {
 const QUESTION_LIBRARY_KEY = "旋转之后_v5_题目库";
 const BOARD_LIBRARY_KEY = "旋转之后_v5_盘面库";
 const SHARE_HASH_PREFIX = "#share=";
+const LIBRARY_SHARE_HASH_PREFIX = "#library=";
 
 const gravityLabel = { up: "向上", right: "向右", down: "向下", left: "向左" };
 const directionLabel = { up: "上", right: "右", down: "下", left: "左" };
@@ -156,8 +157,8 @@ function base64UrlToBytes(value: string) {
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
-async function encodeSharedQuestion(question: SavedQuestion) {
-  const source = new TextEncoder().encode(JSON.stringify(question));
+async function encodeShareData(value: unknown) {
+  const source = new TextEncoder().encode(JSON.stringify(value));
   if ("CompressionStream" in window) {
     const compressed = await new Response(
       new Blob([source]).stream().pipeThrough(new CompressionStream("gzip")),
@@ -167,7 +168,7 @@ async function encodeSharedQuestion(question: SavedQuestion) {
   return `j.${bytesToBase64Url(source)}`;
 }
 
-async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
+async function decodeShareData(token: string): Promise<unknown> {
   if (token.length > 240_000) throw new Error("分享数据过大");
   const [format, payload] = token.split(".", 2);
   let bytes = base64UrlToBytes(payload);
@@ -180,7 +181,11 @@ async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
   } else if (format !== "j") {
     throw new Error("未知分享格式");
   }
-  const item = JSON.parse(new TextDecoder().decode(bytes)) as SavedQuestion;
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+function normalizeSharedQuestion(value: unknown, tokenSuffix: string): SavedQuestion {
+  const item = value as SavedQuestion;
   if (
     !item
     || typeof item.name !== "string"
@@ -195,9 +200,21 @@ async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
   ) throw new Error("分享内容无效");
   return {
     ...item,
-    id: `shared-${token.slice(-24)}`,
+    id: item.id || `shared-${tokenSuffix}`,
     answers: Array.isArray(item.answers) ? item.answers.slice(0, 50) : [],
   };
+}
+
+async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
+  return normalizeSharedQuestion(await decodeShareData(token), token.slice(-24));
+}
+
+async function decodeSharedLibrary(token: string): Promise<SavedQuestion[]> {
+  const value = await decodeShareData(token);
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new Error("整套题库内容无效");
+  }
+  return value.map((item, index) => normalizeSharedQuestion(item, `${token.slice(-16)}-${index}`));
 }
 
 function boardStats(walls: WallGrid, beads: BeadConfig[], rotations: Rotation[]): BoardStats {
@@ -579,7 +596,20 @@ export default function Home() {
         const questions = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_KEY) ?? "[]");
         const boards = JSON.parse(window.localStorage.getItem(BOARD_LIBRARY_KEY) ?? "[]");
         let normalized = normalizeSavedLibraries(questions, boards);
-        if (window.location.hash.startsWith(SHARE_HASH_PREFIX)) {
+        if (window.location.hash.startsWith(LIBRARY_SHARE_HASH_PREFIX)) {
+          const token = window.location.hash.slice(LIBRARY_SHARE_HASH_PREFIX.length);
+          const sharedLibrary = await decodeSharedLibrary(token);
+          const sharedIds = new Set(sharedLibrary.map((item) => item.id));
+          normalized = [
+            ...sharedLibrary,
+            ...normalized.filter((item) => !sharedIds.has(item.id)),
+          ];
+          const first = sharedLibrary[0];
+          setSelectedQuestionId(first.id);
+          setQuestionName(first.name);
+          applySavedQuestion(first);
+          setNotice(`已从整库链接载入 ${sharedLibrary.length} 道题及其全部对应解。`);
+        } else if (window.location.hash.startsWith(SHARE_HASH_PREFIX)) {
           const token = window.location.hash.slice(SHARE_HASH_PREFIX.length);
           const shared = await decodeSharedQuestion(token);
           const existing = normalized.find((item) => item.id === shared.id);
@@ -1214,7 +1244,7 @@ export default function Home() {
       return;
     }
     try {
-      const token = await encodeSharedQuestion(selectedSavedQuestion);
+      const token = await encodeShareData(selectedSavedQuestion);
       const url = `${window.location.origin}${window.location.pathname}${SHARE_HASH_PREFIX}${token}`;
       try {
         await navigator.clipboard.writeText(url);
@@ -1231,6 +1261,33 @@ export default function Home() {
       setNotice(`分享链接已复制：别人打开即可看到“${selectedSavedQuestion.name}”及其 ${selectedSavedQuestion.answers.length} 个解。`);
     } catch {
       setNotice("生成分享链接失败，请减少这道题保存的解数量后重试。");
+    }
+  }
+
+  async function shareWholeLibrary() {
+    if (savedQuestions.length === 0) {
+      setNotice("请先保存至少一道题目。");
+      return;
+    }
+    try {
+      const token = await encodeShareData(savedQuestions);
+      const url = `${window.location.origin}${window.location.pathname}${LIBRARY_SHARE_HASH_PREFIX}${token}`;
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        const input = document.createElement("textarea");
+        input.value = url;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+      const solutionCount = savedQuestions.reduce((count, question) => count + question.answers.length, 0);
+      setNotice(`整套题库链接已复制：共 ${savedQuestions.length} 道题、${solutionCount} 个对应解。`);
+    } catch {
+      setNotice("生成整套题库链接失败，请减少保存内容后重试。");
     }
   }
 
@@ -1334,8 +1391,11 @@ export default function Home() {
             <div className="library-actions three">
               <button type="button" className="library-save" onClick={saveCurrentQuestion}>另存新题</button>
               <button type="button" className="library-save" onClick={updateCurrentQuestion} disabled={!selectedQuestionId}>更新当前题</button>
-              <button type="button" className="library-save share-button" onClick={shareSelectedQuestion} disabled={!selectedQuestionId}>复制分享链接</button>
+              <button type="button" className="library-save" onClick={shareSelectedQuestion} disabled={!selectedQuestionId}>复制单题</button>
             </div>
+            <button type="button" className="library-save library-share-all" onClick={shareWholeLibrary} disabled={savedQuestions.length === 0}>
+              复制全部题库链接（{savedQuestions.length} 题）
+            </button>
 
             <div className="library-divider" />
             <div className="library-subheading">
@@ -1385,7 +1445,7 @@ export default function Home() {
               <button type="button" className="library-save" onClick={saveGeneratedSolutions} disabled={!selectedSavedQuestion || !puzzle}>保存全部系统解</button>
             </div>
             <button type="button" className="library-save" onClick={renameSavedBoard} disabled={!selectedSavedBoard || !answerName.trim()}>用上方名称改名</button>
-            <small className="share-help">普通网址只含程序；“复制分享链接”会把所选题目及其全部解一起带给别人。</small>
+            <small className="share-help">发“全部题库链接”即可一次展示所有题目；打开者可从题目下拉框选择每道题及其对应解。</small>
           </section>
 
           <section className="control-section compact-settings">

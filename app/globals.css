@@ -277,6 +277,13 @@ select:focus-visible {
   color: #fff;
 }
 
+.library-share-all {
+  width: 100%;
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+
 .library-subheading {
   display: flex;
   align-items: center;
