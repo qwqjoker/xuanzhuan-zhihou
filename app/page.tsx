@@ -271,9 +271,8 @@ function positionsFromBeads(beads: BeadConfig[]) {
   return positions;
 }
 
-function framePlaybackDuration(frame: { trajectories: Partial<Record<Color, { r: number; c: number }[]>> }) {
-  const longestPath = Math.max(1, ...Object.values(frame.trajectories).map((path) => path?.length ?? 0));
-  return 1050 + Math.max(180, (longestPath - 1) * 120);
+function framePlaybackDuration() {
+  return 1450;
 }
 
 function edgeId(kind: EdgeKind, row: number, col: number) {
@@ -450,7 +449,7 @@ function Board({
   return (
     <div className="board-stage">
       <div className="gravity-indicator"><span>重力</span><b>↓</b></div>
-      <div className="board-rotor" data-angle={angle} style={{ transform: `rotate(${angle}deg)` }}>
+      <div className="board-rotor" data-angle={angle} style={{ transform: `translateZ(0) rotate(${angle}deg)` }}>
         <div
           ref={boardRef}
           className="board"
@@ -536,7 +535,7 @@ function Board({
                   left: `${(position.c + 0.5) * step}%`,
                   top: `${(position.r + 0.5) * step}%`,
                   width: `${Math.min(7.2, step * 0.66)}%`,
-                  transform: `translate(-50%, -50%) rotate(${-angle}deg)`,
+                  transform: `translate3d(-50%, -50%, 0) rotate(${-angle}deg)`,
                 }}
                 aria-label={`${COLOR_LABEL[bead.color]}珠位于${cellLabel(position.r, position.c)}`}
                 onPointerDown={(event) => {
@@ -679,9 +678,17 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       if (finished) setPlaying(false);
       else setRound((value) => value + 1);
-    }, finished ? 0 : framePlaybackDuration(currentFrame));
+    }, finished ? 0 : framePlaybackDuration());
     return () => window.clearTimeout(timer);
   }, [currentFrame, playbackTurnCount, playing, round]);
+
+  useEffect(() => {
+    if (!playing || !busy || !generationWorker.current) return;
+    generationWorker.current.terminate();
+    generationWorker.current = null;
+    setBusy(false);
+    setNotice("为保证回放和录屏流畅，已暂停后台深度优化；当前已经找到的正解会保留。");
+  }, [busy, playing]);
 
   useEffect(() => {
     const target = frames[Math.min(round, frames.length - 1)];
@@ -697,27 +704,14 @@ export default function Home() {
 
       const forwardOneStep = round === previousRound + 1;
       if (!forwardOneStep) {
-        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 500));
+        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 680));
         return;
       }
 
-      const longestPath = Math.max(1, ...Object.values(target.trajectories).map((path) => path?.length ?? 0));
-      for (let step = 1; step < longestPath; step += 1) {
-        timers.push(window.setTimeout(() => {
-          const positions: Partial<Record<Color, { r: number; c: number } | null>> = {};
-          playbackBeads.forEach((bead) => {
-            const path = target.trajectories[bead.color] ?? [];
-            positions[bead.color] = path.length > 0
-              ? { ...path[Math.min(step, path.length - 1)] }
-              : target.positions[bead.color] ?? null;
-          });
-          setDisplayPositions(positions);
-        }, 940 + step * 120));
-      }
-      timers.push(window.setTimeout(
-        () => setDisplayPositions(target.positions),
-        1000 + Math.max(1, longestPath - 1) * 120,
-      ));
+      // Each tilt is one straight movement under a single rule-gravity.
+      // Move directly to the settled cells with a compositor transition
+      // instead of rerendering the whole 10×10 board once per crossed cell.
+      timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 720));
     });
     return () => {
       window.cancelAnimationFrame(animationFrame);
