@@ -28,6 +28,7 @@ export type Puzzle = {
   beads: BeadConfig[];
   order: Color[];
   turnCount: number;
+  completionRound?: number;
   minLength: number;
   maxLength: number;
   rotations: Rotation[];
@@ -946,6 +947,8 @@ function constructScheduledPuzzle(
   avoidIdleTurns: boolean,
   constructionAttempts = 220,
   fixedRotations?: Rotation[],
+  requiredWallKeys: string[] = [],
+  variantOffset = 0,
 ): Puzzle | null {
   const attemptLimit = Math.max(1, constructionAttempts);
   const debug = Boolean((globalThis as { __MAZE_DEBUG__?: boolean }).__MAZE_DEBUG__);
@@ -954,7 +957,7 @@ function constructScheduledPuzzle(
     if (debug) debugStats[reason] = (debugStats[reason] ?? 0) + 1;
   };
   for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
-    const sequenceVariant = attempt + 1;
+    const sequenceVariant = variantOffset + attempt + 1;
     const sequence = fixedRotations
       ? { rotations: [...fixedRotations], gravities: gravitiesForRotations(fixedRotations) }
       : constrainedRotationSequence(beads, turnCount, targetRounds, sequenceVariant);
@@ -977,6 +980,20 @@ function constructScheduledPuzzle(
     assignments = trunkAssignments;
     for (const bead of beads) {
       if (!assignWall(assignments, wallEdgeKey(bead.start, "down"), true)) {
+        conflict = true;
+        break;
+      }
+    }
+    for (const edgeKey of requiredWallKeys) {
+      const [kind, rowText, colText] = edgeKey.split("-");
+      const row = Number(rowText);
+      const col = Number(colText);
+      if (
+        (kind !== "h" && kind !== "v")
+        || !Number.isInteger(row)
+        || !Number.isInteger(col)
+        || !assignWall(assignments, edgeKey, true)
+      ) {
         conflict = true;
         break;
       }
@@ -1004,7 +1021,7 @@ function constructScheduledPuzzle(
         targetRound,
         sequence.gravities,
         size,
-        attempt * 31 + beadIndex * 7 + 1,
+        sequenceVariant * 31 + beadIndex * 7 + 1,
         2,
       );
       if (options.length === 0) reject(`plan-${bead.color}`);
@@ -1072,12 +1089,14 @@ function constructScheduledPuzzle(
       beads: beads.map((bead) => ({ ...bead, start: { ...bead.start }, exit: { cell: { ...bead.exit.cell }, direction: bead.exit.direction } })),
       order: [...order],
       turnCount,
+      completionRound: Math.max(0, ...Object.values(targetRounds).map((round) => round ?? 0)),
       minLength,
       maxLength,
       rotations: sequence.rotations,
       dropRounds: { ...targetRounds },
       paths,
       referenceWalls: walls,
+      presetWalls: wallsFromRequiredPanels(size, beads, requiredWallKeys),
       solutionLowerBound: 1,
       countedSamples: 0,
       commonChannelLength: 3,
@@ -1172,15 +1191,18 @@ export function generateAutomaticPuzzle(
   requiredWallKeys: string[] = [],
 ): Puzzle | null {
   if (!allBeadsShareExit(beads) || order.length !== beads.length) return null;
-  if (fixedRotations && forbiddenWallKeys.length === 0 && requiredWallKeys.length === 0 && !initialWalls) {
+  if (fixedRotations && forbiddenWallKeys.length === 0 && !initialWalls) {
     const constructed = generatePuzzleForRotations(
       size,
       beads,
       order,
       fixedRotations,
-      Math.max(220, Math.ceil(attempts / 4)),
+      Math.max(64, Math.ceil(attempts / 6)),
+      completionTurnLimit,
+      requiredWallKeys,
+      variantOffset,
     );
-    if (constructed && constructed.turnCount <= completionTurnLimit) return constructed;
+    if (constructed && puzzleCompletionRound(constructed) <= completionTurnLimit) return constructed;
   }
   const settledPuzzle = generateSettledGravityPuzzle(
     size,
@@ -1246,27 +1268,76 @@ export function generatePuzzleForRotations(
   order: Color[],
   rotations: Rotation[],
   attempts = 220,
+  completionTurnLimit = rotations.length,
+  requiredWallKeys: string[] = [],
+  variantOffset = 0,
 ): Puzzle | null {
   if (!allBeadsShareExit(beads) || order.length !== beads.length) return null;
   const gravities = gravitiesForRotations(rotations);
   const opportunities = rotations
     .map((_, index) => index + 1)
-    .filter((round) => gravities[round] === beads[0].exit.direction);
-  if (opportunities.length < beads.length) return null;
-  const targetRounds: Partial<Record<Color, number>> = {};
-  order.forEach((color, index) => { targetRounds[color] = opportunities[index]; });
-  return constructScheduledPuzzle(
-    size,
-    beads,
-    order,
-    rotations.length,
-    targetRounds,
-    3,
-    size * size,
-    false,
-    attempts,
-    rotations,
-  );
+    .filter((round) =>
+      round <= completionTurnLimit
+      && gravities[round] === beads[0].exit.direction);
+  if (opportunities.length === 0) return null;
+
+  // Multiple beads may leave in the same rotation. Try grouped schedules in
+  // increasing completion-round order instead of forcing one bead into every
+  // separate outlet opportunity.
+  for (let endIndex = 0; endIndex < opportunities.length; endIndex += 1) {
+    const schedules: number[][] = [];
+    const build = (index: number, minimum: number, current: number[]) => {
+      if (index === order.length - 1) {
+        schedules.push([...current, endIndex]);
+        return;
+      }
+      for (let opportunityIndex = endIndex; opportunityIndex >= minimum; opportunityIndex -= 1) {
+        current.push(opportunityIndex);
+        build(index + 1, opportunityIndex, current);
+        current.pop();
+      }
+    };
+    build(0, 0, []);
+    schedules.sort((a, b) => {
+      const groups = (schedule: number[]) => new Set(schedule).size;
+      return groups(a) - groups(b)
+        || b.reduce((sum, value) => sum + value, 0)
+          - a.reduce((sum, value) => sum + value, 0);
+    });
+    const scheduleLimit = Math.min(24, schedules.length);
+    // Treat `attempts` as one budget for the whole completion search. Earlier
+    // impossible rounds must not each consume the full budget before a later,
+    // feasible completion round is reached.
+    const attemptsPerSchedule = Math.max(
+      2,
+      Math.min(
+        32,
+        Math.ceil(attempts / Math.max(1, scheduleLimit * opportunities.length)),
+      ),
+    );
+    for (let scheduleIndex = 0; scheduleIndex < scheduleLimit; scheduleIndex += 1) {
+      const targetRounds: Partial<Record<Color, number>> = {};
+      order.forEach((color, index) => {
+        targetRounds[color] = opportunities[schedules[scheduleIndex][index]];
+      });
+      const constructed = constructScheduledPuzzle(
+        size,
+        beads,
+        order,
+        rotations.length,
+        targetRounds,
+        3,
+        size * size,
+        false,
+        attemptsPerSchedule,
+        rotations,
+        requiredWallKeys,
+        variantOffset + scheduleIndex * 37,
+      );
+      if (constructed) return constructed;
+    }
+  }
+  return null;
 }
 
 type CandidateEvaluation = {
@@ -1648,8 +1719,7 @@ function generateSettledGravityPuzzle(
           (last, frame) => frame.dropped.length ? frame.round : last,
           0,
         );
-        const usedRotations = rotations.slice(0, lastDropRound);
-        const frames = simulateWalls(best, beads, usedRotations);
+        const frames = simulateWalls(best, beads, rotations);
         const dropRounds: Partial<Record<Color, number>> = {};
         frames.forEach((frame) => frame.dropped.forEach((color) => { dropRounds[color] = frame.round; }));
         const puzzle: Puzzle = {
@@ -1661,10 +1731,11 @@ function generateSettledGravityPuzzle(
             exit: { cell: { ...bead.exit.cell }, direction: bead.exit.direction },
           })),
           order: [...order],
-          turnCount: usedRotations.length,
+          turnCount: rotations.length,
+          completionRound: lastDropRound,
           minLength: 3,
           maxLength: size * size,
-          rotations: usedRotations,
+          rotations: [...rotations],
           dropRounds,
           paths: pathsFromFrames(beads, frames),
           referenceWalls: best,
@@ -2098,26 +2169,27 @@ export function countInternalPanels(walls: WallGrid): number {
   return count;
 }
 
+export function puzzleCompletionRound(puzzle: Puzzle): number {
+  if (puzzle.completionRound !== undefined) return puzzle.completionRound;
+  const rounds = puzzle.order.map((color) => puzzle.dropRounds[color] ?? 0);
+  return rounds.every((round) => round > 0) ? Math.max(...rounds) : 0;
+}
+
 /**
- * Finds the shortest valid clockwise/counter-clockwise sequence for an
- * already solved wall layout. This is a breadth-first search over every
- * reachable board state, so it does not mistake the user's turn ceiling for
- * the answer length and it keeps all same-round drop events.
+ * Recomputes drop metadata for the prescribed rotation sequence without
+ * deleting any trailing question rounds after the last bead has left.
  */
 export function minimizePuzzleRounds(puzzle: Puzzle, maximumTurns = puzzle.turnCount): Puzzle {
-  const sequence = findShortestRotationSolution(
-    puzzle.referenceWalls,
-    puzzle.beads,
-    puzzle.order,
-    Math.max(1, maximumTurns),
-  );
-  if (!sequence) return puzzle;
-  const frames = simulateWalls(puzzle.referenceWalls, puzzle.beads, sequence.rotations);
+  const rotations = puzzle.rotations.slice(0, Math.max(1, maximumTurns));
+  const frames = simulateWalls(puzzle.referenceWalls, puzzle.beads, rotations);
+  const dropRounds: Partial<Record<Color, number>> = {};
+  frames.forEach((frame) => frame.dropped.forEach((color) => { dropRounds[color] = frame.round; }));
+  const completionRound = Math.max(0, ...puzzle.order.map((color) => dropRounds[color] ?? 0));
+  if (puzzle.order.some((color) => !dropRounds[color])) return puzzle;
   return {
     ...puzzle,
-    turnCount: sequence.rotations.length,
-    rotations: sequence.rotations,
-    dropRounds: sequence.dropRounds,
+    completionRound,
+    dropRounds,
     paths: pathsFromFrames(puzzle.beads, frames),
   };
 }

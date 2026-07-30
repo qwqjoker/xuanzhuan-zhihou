@@ -7,13 +7,12 @@ import {
   Rotation,
   WallGrid,
   countInternalPanels,
-  distinctRotationPatterns,
   generateAutomaticPuzzle,
   internalPanelKeys,
   isIndependentPuzzleSolution,
   isLocallyMinimalPuzzleSolution,
-  minimizePuzzleRounds,
   minimizePuzzleWalls,
+  puzzleCompletionRound,
 } from "./maze";
 
 type GenerateRequest = {
@@ -39,25 +38,39 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
   if (request.type !== "generate") return;
 
   const send = (message: WorkerResponse) => scope.postMessage(message);
-  send({ type: "progress", message: "正在按五珠顺序搜索共享、分叉的规则迷宫…" });
+  send({ type: "progress", message: "正在按固定旋转序列寻找完整正解…" });
+
   const puzzles: Puzzle[] = [];
   const candidateSignatures = new Set<string>();
-  const panelCandidateTarget = request.optimizePanels ? 6 : 3;
   const requiredWallKeys = internalPanelKeys(request.presetWalls);
-  const optimize = (puzzle: Puzzle) => {
-    const roundMinimized = minimizePuzzleRounds(
-      puzzle,
-      Math.min(request.turnCount, puzzle.turnCount),
-    );
-    const panelMinimized = minimizePuzzleWalls(
-      roundMinimized,
-      request.optimizePanels ? 12 : 4,
-    );
-    const verified = minimizePuzzleRounds(panelMinimized, roundMinimized.turnCount);
-    return { ...verified, panelCount: countInternalPanels(verified.referenceWalls) };
+  const candidateTarget = request.optimizePanels ? 4 : 3;
+  const variantOffsets = [0, 109, 41, 17, 233, 317, 503, 701];
+  const prescribedRotations = Array.from(
+    { length: request.turnCount },
+    (_, index) => request.rotations[index]
+      ?? request.rotations[index % Math.max(1, request.rotations.length)]
+      ?? "cw",
+  );
+
+  const publishable = (puzzle: Puzzle): Puzzle => ({
+    ...puzzle,
+    turnCount: request.turnCount,
+    completionRound: puzzleCompletionRound(puzzle),
+    rotations: [...prescribedRotations],
+    panelCount: countInternalPanels(puzzle.referenceWalls),
+  });
+
+  const optimize = (puzzle: Puzzle, trials = request.optimizePanels ? 12 : 4) => {
+    const normalized = publishable(puzzle);
+    return publishable(minimizePuzzleWalls(normalized, trials));
   };
+
   const accept = (puzzle: Puzzle | null) => {
     if (!puzzle) return false;
+    const completionRound = puzzleCompletionRound(puzzle);
+    if (completionRound < 1 || completionRound > request.turnCount) return false;
+    if (puzzle.rotations.length !== prescribedRotations.length) return false;
+    if (puzzle.rotations.some((rotation, index) => rotation !== prescribedRotations[index])) return false;
     const minimized = optimize(puzzle);
     if (!isLocallyMinimalPuzzleSolution(minimized)) return false;
     const signature = internalPanelKeys(minimized.referenceWalls).sort().join("|");
@@ -67,255 +80,148 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     return true;
   };
 
-  const exitDirection = request.beads[0].exit.direction;
-  const earliestExitRound = exitDirection === "left" || exitDirection === "right" ? 1 : 2;
-  const synthesisTurns = earliestExitRound + Math.max(0, request.beads.length - 1) * 2;
-  const automaticOffsets = [0, 109, 41, 17];
-  const plannedWindow = (planningHorizon: number) => Array.from(
-    { length: planningHorizon },
-    (_, index) => request.rotations[index]
-      ?? request.rotations[index % Math.max(1, request.rotations.length)]
-      ?? "cw",
-  );
-  const generatePlanned = (
-    planningHorizon: number,
+  const generate = (
     completionTurnLimit: number,
-    attempts = request.beads.length >= 4 ? 800 : 500,
-  ) =>
-    generateAutomaticPuzzle(
-      request.size,
-      request.beads,
-      request.order,
-      planningHorizon,
-      attempts,
-      0,
-      plannedWindow(planningHorizon),
-      [],
-      undefined,
-      completionTurnLimit,
-      requiredWallKeys,
-    );
-  const generateAutomatic = (
-    planningHorizon: number,
-    completionTurnLimit: number,
-    offset: number,
-    index: number,
-    attempts = request.beads.length >= 4 ? (index === 0 ? 1200 : 800) : 500,
+    attempts: number,
+    variantOffset: number,
+    forbiddenWallKeys: string[] = [],
+    initialWalls?: WallGrid,
   ) => generateAutomaticPuzzle(
     request.size,
     request.beads,
     request.order,
-    planningHorizon,
+    request.turnCount,
     attempts,
-    offset,
-    undefined,
-    [],
-    undefined,
+    variantOffset,
+    prescribedRotations,
+    forbiddenWallKeys,
+    initialWalls,
     completionTurnLimit,
     requiredWallKeys,
   );
+
   const preview = (puzzle: Puzzle, message: string) => {
-    const roundMinimized = minimizePuzzleRounds(
-      puzzle,
-      Math.min(request.turnCount, puzzle.turnCount),
-    );
-    const quicklyReduced = minimizePuzzleWalls(roundMinimized, 1);
-    send({
-      type: "partial",
-      puzzles: [{
-        ...quicklyReduced,
-        panelCount: countInternalPanels(quicklyReduced.referenceWalls),
-      }],
-      message,
-    });
+    const quicklyReduced = optimize(puzzle, 1);
+    send({ type: "partial", puzzles: [quicklyReduced], message });
   };
 
-  // Stage 1: return one verified answer quickly. The longer searches for fewer
-  // rounds, fewer panels and independent alternatives happen only after the
-  // user already has a playable board.
-  const horizonCeiling = Math.max(synthesisTurns, request.turnCount);
-  const planningHorizons: number[] = [];
-  for (let horizon = synthesisTurns; horizon <= horizonCeiling; horizon += 2) {
-    planningHorizons.push(horizon);
-  }
-  let firstCorrectPuzzle: Puzzle | null = null;
-  send({ type: "progress", message: "先快速寻找一套可播放的完整正解…" });
-  for (const horizon of planningHorizons) {
-    firstCorrectPuzzle = generatePlanned(horizon, request.turnCount);
-    if (firstCorrectPuzzle) break;
-  }
-  for (let index = 0; index < automaticOffsets.length && !firstCorrectPuzzle; index += 1) {
-    for (const horizon of planningHorizons) {
-      firstCorrectPuzzle = generateAutomatic(
-        horizon,
-        request.turnCount,
-        automaticOffsets[index],
-        index,
-      );
-      if (firstCorrectPuzzle) break;
+  // A bead can only leave on a round whose board gravity points at the shared
+  // outlet. These are the only completion lengths worth searching.
+  const orientationGravity = ["down", "right", "up", "left"] as const;
+  let orientation = 0;
+  const exitOpportunityRounds: number[] = [];
+  prescribedRotations.forEach((rotation, index) => {
+    orientation = (orientation + (rotation === "cw" ? 1 : 3)) % 4;
+    if (orientationGravity[orientation] === request.beads[0].exit.direction) {
+      exitOpportunityRounds.push(index + 1);
     }
-  }
-  if (firstCorrectPuzzle) {
-    firstCorrectPuzzle = minimizePuzzleRounds(
-      firstCorrectPuzzle,
-      Math.min(request.turnCount, firstCorrectPuzzle.turnCount),
+  });
+
+  // Stage 1: find one valid solution quickly while preserving every prescribed
+  // round. Later rounds remain part of the question even after all beads leave.
+  let bestPuzzle: Puzzle | null = null;
+  for (let index = 0; index < variantOffsets.length && !bestPuzzle; index += 1) {
+    bestPuzzle = generate(
+      request.turnCount,
+      request.beads.length >= 4 ? (index === 0 ? 1400 : 900) : 600,
+      variantOffsets[index],
     );
+  }
+  if (bestPuzzle) {
     preview(
-      firstCorrectPuzzle,
-      `已找到并显示 ${firstCorrectPuzzle.turnCount} 轮正解；后台继续检查能否用更少轮完成…`,
+      bestPuzzle,
+      `已找到完整正解：题目保留 ${request.turnCount} 轮，当前第 ${puzzleCompletionRound(bestPuzzle)} 轮完成；继续压缩完成轮次…`,
     );
   }
 
-  // Stage 2: with a valid upper bound in hand, test shorter completion lengths
-  // in ascending order. The first verified hit is the minimum found length.
-  if (firstCorrectPuzzle) {
-    for (
-      let targetTurns = earliestExitRound;
-      targetTurns < firstCorrectPuzzle.turnCount;
-      targetTurns += 2
-    ) {
-      send({
-        type: "progress",
-        message: `已有正解；正在验证能否压缩到 ${targetTurns} 轮…`,
-      });
-      const planningHorizon = Math.max(targetTurns, synthesisTurns);
-      let shorter = generatePlanned(planningHorizon, targetTurns, 500);
-      for (let index = 0; index < 3 && !shorter; index += 1) {
-        shorter = generateAutomatic(
-          planningHorizon,
-          targetTurns,
-          automaticOffsets[index],
-          index,
-          400,
-        );
-      }
-      if (shorter) {
-        firstCorrectPuzzle = minimizePuzzleRounds(shorter, targetTurns);
-        preview(
-          shorter,
-          `已把正解压缩到 ${shorter.turnCount} 轮；后台开始比较同轮插板数…`,
-        );
-        break;
-      }
-    }
-  }
-
-  // Stage 3: only after correctness and completion length are settled may wall
-  // minimization and independent-solution comparisons participate in ranking.
-  if (firstCorrectPuzzle) accept(firstCorrectPuzzle);
-
-  if (puzzles.length > 0) {
-    const shortestTurns = Math.min(...puzzles.map((puzzle) => puzzle.turnCount));
-    const solutionPlanningHorizon = Math.max(shortestTurns, synthesisTurns);
+  // Stage 2: search completion opportunities from earliest to latest. The
+  // first verified hit is the minimum completion round found for this exact
+  // clockwise/counter-clockwise sequence.
+  const currentCompletion = bestPuzzle ? puzzleCompletionRound(bestPuzzle) : request.turnCount + 1;
+  const shorterTargets = exitOpportunityRounds.filter((round) => round < currentCompletion);
+  for (const targetRound of shorterTargets) {
     send({
       type: "progress",
-      message: `最少轮搜索完成；正在同为 ${shortestTurns} 轮的正解中减少插板并搜索独立解…`,
+      message: `已有正解；正在验证是否能在第 ${targetRound} 轮全部完成…`,
+    });
+    let shorter: Puzzle | null = null;
+    for (let index = 0; index < Math.min(2, variantOffsets.length) && !shorter; index += 1) {
+      shorter = generate(
+        targetRound,
+        request.beads.length >= 4 ? 700 : 450,
+        variantOffsets[index] + targetRound * 53,
+      );
+    }
+    if (shorter) {
+      bestPuzzle = shorter;
+      preview(
+        shorter,
+        `已压缩到第 ${targetRound} 轮完成；题目仍保留全部 ${request.turnCount} 轮，继续比较同轮最少挡板…`,
+      );
+      break;
+    }
+  }
+
+  // Stage 3: only after completion length is fixed do panel count and
+  // independent route families participate in ranking.
+  if (bestPuzzle) accept(bestPuzzle);
+  if (puzzles.length > 0) {
+    const shortestRound = Math.min(...puzzles.map(puzzleCompletionRound));
+    send({
+      type: "progress",
+      message: `最早完成轮次为第 ${shortestRound} 轮；正在减少挡板并寻找不同路径的独立解…`,
     });
     const startSupports = new Set(
       request.beads.map((bead) => `h-${bead.start.r + 1}-${bead.start.c}`),
     );
     const primaryEdges = internalPanelKeys(puzzles[0].referenceWalls)
-      .filter((edge) => !startSupports.has(edge));
-    const plannedSignature = request.rotations.join("|");
-    const rotationPatterns = distinctRotationPatterns(
-      request.beads[0].exit.direction,
-      solutionPlanningHorizon,
-      request.beads.length,
-      24,
-    )
-      .filter((pattern) => pattern.join("|") !== plannedSignature)
-      .sort((a, b) => {
-        const distance = (pattern: Rotation[]) => pattern.reduce(
-          (total, rotation, index) => total + (rotation === request.rotations[index] ? 0 : 1),
-          Math.abs(pattern.length - request.rotations.length),
-        );
-        return distance(a) - distance(b);
-      });
-    const productivePatterns: Rotation[][] = [];
-    const panelSearchBudget = request.optimizePanels ? 14 : 6;
+      .filter((edge) => !startSupports.has(edge) && !requiredWallKeys.includes(edge));
+    const panelSearchBudget = request.optimizePanels ? 8 : 5;
     let panelSearchAttempts = 0;
 
-    // Collect several same-round valid candidates before ranking by panel
-    // count. A candidate is kept even when it shares a drop schedule with an
-    // earlier one, because it may use fewer panels.
     for (
-      let index = 0;
-      index < Math.min(rotationPatterns.length, 12)
-        && puzzles.length < panelCandidateTarget
+      let offsetIndex = 0;
+      offsetIndex < variantOffsets.length
+        && puzzles.length < candidateTarget
         && panelSearchAttempts < panelSearchBudget;
-      index += 1
+      offsetIndex += 1
     ) {
-      if (primaryEdges.length === 0) break;
-      panelSearchAttempts += 1;
-      const pattern = rotationPatterns[index];
-      const candidate = generateAutomaticPuzzle(
-        request.size,
-        request.beads,
-        request.order,
-        solutionPlanningHorizon,
-        request.beads.length >= 4 ? 1000 : 500,
-        101 + index * 19,
-        pattern,
-        [primaryEdges[0]],
-        puzzles[0].referenceWalls,
-        shortestTurns,
-        requiredWallKeys,
-      );
-      if (accept(candidate)) {
-        productivePatterns.push(pattern);
-        send({ type: "progress", message: `已比较 ${puzzles.length} 套同轮正解；当前最少 ${Math.min(...puzzles.map((item) => item.panelCount ?? Infinity))} 片插板…` });
-      }
-    }
-
-    // Once a timing family works, force other route walls out to obtain more
-    // independently minimized schedules before trying less promising patterns.
-    const remainingPatterns = [
-      ...productivePatterns,
-      ...rotationPatterns.filter((pattern) => !productivePatterns.includes(pattern)),
-    ];
-    for (
-      let patternIndex = 0;
-      patternIndex < remainingPatterns.length
-        && puzzles.length < panelCandidateTarget
-        && panelSearchAttempts < panelSearchBudget;
-      patternIndex += 1
-    ) {
+      const edgeChoices = primaryEdges.length > 0 ? primaryEdges : [""];
       for (
-        let edgeIndex = 1;
-        edgeIndex < primaryEdges.length
-          && puzzles.length < panelCandidateTarget
+        let edgeIndex = 0;
+        edgeIndex < edgeChoices.length
+          && puzzles.length < candidateTarget
           && panelSearchAttempts < panelSearchBudget;
         edgeIndex += 1
       ) {
         panelSearchAttempts += 1;
-        const candidate = generateAutomaticPuzzle(
-          request.size,
-          request.beads,
-          request.order,
-          solutionPlanningHorizon,
-          request.beads.length >= 4 ? 1200 : 600,
-          401 + patternIndex * 97 + edgeIndex * 29,
-          remainingPatterns[patternIndex],
-          [primaryEdges[edgeIndex]],
+        const forbidden = edgeChoices[edgeIndex] ? [edgeChoices[edgeIndex]] : [];
+        const candidate = generate(
+          shortestRound,
+          request.beads.length >= 4 ? 1000 : 550,
+          1009 + variantOffsets[offsetIndex] + edgeIndex * 71,
+          forbidden,
           puzzles[0].referenceWalls,
-          shortestTurns,
-          requiredWallKeys,
         );
         if (accept(candidate)) {
-          send({ type: "progress", message: `已比较 ${puzzles.length} 套同轮正解；当前最少 ${Math.min(...puzzles.map((item) => item.panelCount ?? Infinity))} 片插板…` });
+          send({
+            type: "progress",
+            message: `已比较 ${puzzles.length} 套第 ${shortestRound} 轮完成的独立正解；当前最少 ${Math.min(...puzzles.map((item) => item.panelCount ?? Infinity))} 片挡板…`,
+          });
         }
       }
     }
   }
+
   puzzles.sort((a, b) =>
-    a.turnCount - b.turnCount
+    puzzleCompletionRound(a) - puzzleCompletionRound(b)
     || (a.panelCount ?? countInternalPanels(a.referenceWalls))
       - (b.panelCount ?? countInternalPanels(b.referenceWalls)),
   );
-  const shortest = puzzles[0]?.turnCount;
-  const shortestCandidates = shortest === undefined
+  const shortestRound = puzzles[0] ? puzzleCompletionRound(puzzles[0]) : undefined;
+  const shortestCandidates = shortestRound === undefined
     ? []
-    : puzzles.filter((puzzle) => puzzle.turnCount === shortest);
+    : puzzles.filter((puzzle) => puzzleCompletionRound(puzzle) === shortestRound);
   const ranked: Puzzle[] = [];
   for (const candidate of shortestCandidates) {
     if (ranked.length === 0 || isIndependentPuzzleSolution(candidate, ranked)) {
@@ -323,10 +229,7 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     }
     if (ranked.length >= 3) break;
   }
-  send({
-    type: "result",
-    puzzles: ranked,
-  });
+  send({ type: "result", puzzles: ranked });
 };
 
 export {};

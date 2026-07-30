@@ -19,6 +19,7 @@ import {
   exitToEdge,
   makeAnswerWalls,
   makeBlankWalls,
+  puzzleCompletionRound,
   resizeBeads,
   sharedTrunkCells,
   simulateWalls,
@@ -1059,13 +1060,13 @@ export default function Home() {
       if (results.length === 0) {
         setNotice(receivedPartial
           ? "已保留先前找到的正解；后续优化未找到更好的候选。"
-          : `在 ${turnCount} 轮上限内仍未找到完整解；请移动起点或增加旋转上限。`);
+          : `在题目规定的 ${turnCount} 轮内仍未找到完整解；请移动起点或增加题目轮数。`);
         setBusy(false);
         return;
       }
       const result = results[0];
       showGeneratedResults(results);
-      setNotice(`最终优化完成：上限 ${turnCount} 内最少 ${result.turnCount} 轮；在同轮正解候选中，当前方案插板最少（${result.panelCount} 片）。`);
+      setNotice(`最终优化完成：题目保留全部 ${result.turnCount} 轮；最早第 ${puzzleCompletionRound(result)} 轮完成，并在同轮正解候选中使用最少插板（${result.panelCount} 片）。`);
       setBusy(false);
     };
     worker.onerror = () => {
@@ -1112,8 +1113,8 @@ export default function Home() {
     setPlaying(false);
     setValidation(null);
     setNotice(index === 0
-      ? `当前最终方案：最少 ${next.turnCount} 轮，并在同轮正解候选中以 ${next.panelCount} 片插板排名第一。`
-      : `已切换到同为 ${next.turnCount} 轮的独立解 ${index}：${next.panelCount} 片插板。`);
+      ? `当前最终方案：题目共 ${next.turnCount} 轮，第 ${puzzleCompletionRound(next)} 轮完成，并在同轮正解候选中以 ${next.panelCount} 片插板排名第一。`
+      : `已切换到同为第 ${puzzleCompletionRound(next)} 轮完成的独立解 ${index}：${next.panelCount} 片插板。`);
   }
 
   function resetSetup() {
@@ -1595,7 +1596,7 @@ export default function Home() {
 
           <section className="control-section compact-settings">
             <label><span className="field-label">盘面大小</span><div className="number-unit"><input aria-label="盘面大小" type="number" min={5} max={16} value={size} disabled={Boolean(puzzle)} onChange={(event) => updateSize(Number(event.target.value))} /><span>× {size}</span></div></label>
-            <label><span className="field-label">旋转次数上限</span><div className="number-unit"><input aria-label="旋转次数上限" type="number" min={1} max={30} value={turnCount} disabled={Boolean(puzzle)} onChange={(event) => updateTurnCount(Number(event.target.value))} /><span>次</span></div></label>
+            <label><span className="field-label">题目旋转轮数</span><div className="number-unit"><input aria-label="题目旋转轮数" type="number" min={1} max={30} value={turnCount} disabled={Boolean(puzzle)} onChange={(event) => updateTurnCount(Number(event.target.value))} /><span>轮</span></div></label>
           </section>
 
           <section className="control-section">
@@ -1679,7 +1680,7 @@ export default function Home() {
                       onClick={() => selectSolution(solution, index)}
                     >
                       <strong>{busy && index === 0 ? "临时正解（优化中）" : index === 0 ? "最少轮·最少挡板" : `同轮独立解 ${index}`}</strong>
-                      <span>{solution.panelCount ?? countInternalPanels(solution.referenceWalls)} 片 · {solution.turnCount} 轮</span>
+                      <span>{solution.panelCount ?? countInternalPanels(solution.referenceWalls)} 片 · 第 {puzzleCompletionRound(solution)} 轮完成</span>
                     </button>
                   ))}
                 </div>
@@ -1688,7 +1689,7 @@ export default function Home() {
               <div className="drop-schedule">
                 {puzzle.order.map((color) => <div key={color}><span className={`mini-ball ${color}`} /><b>{COLOR_LABEL[color]}珠</b><em>第 {puzzle.dropRounds[color]} 次</em></div>)}
               </div>
-              <p className="solution-count">实际完成 <strong>{puzzle.turnCount}</strong> 轮 · 内部插板 <strong>{puzzle.panelCount ?? countInternalPanels(puzzle.referenceWalls)}</strong> 片<span>{busy ? "临时正解，挡板仍在优化；不是最终答案" : "最终排序：正解 → 最少轮 → 同轮最少挡板"}</span></p>
+              <p className="solution-count">题目保留 <strong>{puzzle.turnCount}</strong> 轮 · 第 <strong>{puzzleCompletionRound(puzzle)}</strong> 轮完成 · 内部插板 <strong>{puzzle.panelCount ?? countInternalPanels(puzzle.referenceWalls)}</strong> 片<span>{busy ? "临时正解，仍在压缩完成轮次和挡板数；不是最终答案" : "最终排序：正解 → 最早完成轮 → 同轮最少挡板"}</span></p>
             </section>
           )}
         </aside>
