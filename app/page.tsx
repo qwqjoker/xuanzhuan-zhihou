@@ -272,13 +272,39 @@ function positionsFromBeads(beads: BeadConfig[]) {
   return positions;
 }
 
-function frameMovementDuration(frame: { trajectories: Partial<Record<Color, { r: number; c: number }[]>> }) {
-  const longestPath = Math.max(1, ...Object.values(frame.trajectories).map((path) => path?.length ?? 0));
-  return Math.max(800, Math.min(1700, 520 + Math.max(0, longestPath - 1) * 150));
+const ROTATION_ANIMATION_MS = 800;
+const MOVEMENT_START_MS = 850;
+const MOVEMENT_MS_PER_CELL = 150;
+const PLAYBACK_SETTLE_MS = 180;
+
+type PlaybackTimingFrame = {
+  trajectories: Partial<Record<Color, { r: number; c: number }[]>>;
+  dropped: Color[];
+};
+
+function colorMovementSteps(frame: PlaybackTimingFrame, color: Color) {
+  const path = frame.trajectories[color] ?? [];
+  const stepsInsideBoard = Math.max(0, path.length - 1);
+  return stepsInsideBoard + (frame.dropped.includes(color) ? 1 : 0);
 }
 
-function framePlaybackDuration(frame: { trajectories: Partial<Record<Color, { r: number; c: number }[]>> }) {
-  return 1200 + frameMovementDuration(frame) + 300;
+function colorMovementDuration(frame: PlaybackTimingFrame, color: Color) {
+  return colorMovementSteps(frame, color) * MOVEMENT_MS_PER_CELL;
+}
+
+function frameMovementDurations(frame: PlaybackTimingFrame) {
+  return Object.fromEntries(
+    ALL_COLORS.map((color) => [color, colorMovementDuration(frame, color)]),
+  ) as Record<Color, number>;
+}
+
+function frameMovementDuration(frame: PlaybackTimingFrame) {
+  const durations = frameMovementDurations(frame);
+  return Math.max(0, ...ALL_COLORS.map((color) => durations[color]));
+}
+
+function framePlaybackDuration(frame: PlaybackTimingFrame) {
+  return MOVEMENT_START_MS + frameMovementDuration(frame) + PLAYBACK_SETTLE_MS;
 }
 
 function edgeId(kind: EdgeKind, row: number, col: number) {
@@ -404,7 +430,7 @@ function Board({
   beads,
   positions,
   angle,
-  moveDuration,
+  moveDurations,
   editStarts,
   editExits,
   editWalls,
@@ -422,7 +448,7 @@ function Board({
   beads: BeadConfig[];
   positions: Partial<Record<Color, { r: number; c: number } | null>>;
   angle: number;
-  moveDuration: number;
+  moveDurations: Partial<Record<Color, number>>;
   editStarts: boolean;
   editExits: boolean;
   editWalls: boolean;
@@ -462,7 +488,6 @@ function Board({
         data-angle={angle}
         style={{
           transform: `translateZ(0) rotate(${angle}deg)`,
-          "--ball-move-duration": `${moveDuration}ms`,
         } as CSSProperties}
       >
         <div
@@ -551,7 +576,8 @@ function Board({
                   top: `${(position.r + 0.5) * step}%`,
                   width: `${Math.min(7.2, step * 0.66)}%`,
                   transform: `translate3d(-50%, -50%, 0) rotate(${-angle}deg)`,
-                }}
+                  "--ball-move-duration": `${moveDurations[bead.color] ?? 0}ms`,
+                } as CSSProperties}
                 aria-label={`${COLOR_LABEL[bead.color]}珠位于${cellLabel(position.r, position.c)}`}
                 onPointerDown={(event) => {
                   if (!editStarts) return;
@@ -719,7 +745,7 @@ export default function Home() {
 
       const forwardOneStep = round === previousRound + 1;
       if (!forwardOneStep) {
-        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 1180));
+        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), ROTATION_ANIMATION_MS + 20));
         return;
       }
 
@@ -740,10 +766,10 @@ export default function Home() {
       // First finish the 90-degree turn. Then animate every bead along the
       // current straight gravity path; dropped beads travel visibly beyond
       // the shared outlet before they are removed from the board.
-      timers.push(window.setTimeout(() => setDisplayPositions(visualTargets), 1200));
+      timers.push(window.setTimeout(() => setDisplayPositions(visualTargets), MOVEMENT_START_MS));
       timers.push(window.setTimeout(
         () => setDisplayPositions(target.positions),
-        1200 + movementDuration,
+        MOVEMENT_START_MS + movementDuration,
       ));
     });
     return () => {
@@ -1687,7 +1713,7 @@ export default function Home() {
             beads={puzzle?.beads ?? beads}
             positions={boardPositions}
             angle={displayAngle}
-            moveDuration={frameMovementDuration(currentFrame)}
+            moveDurations={frameMovementDurations(currentFrame)}
             editStarts={!playing && round === 0 && !puzzle && setupMode === "start"}
             editExits={!playing && round === 0 && !puzzle && setupMode === "exit"}
             editWalls={!playing && round === 0 && ((!puzzle && setupMode === "walls") || Boolean(puzzle && source === "answer"))}

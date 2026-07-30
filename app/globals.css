@@ -866,7 +866,7 @@ select:focus-visible {
 .board-rotor {
   width: 86%;
   aspect-ratio: 1;
-  transition: transform 1150ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 800ms cubic-bezier(0.4, 0, 0.2, 1);
   transform-origin: center;
   will-change: transform;
   backface-visibility: hidden;
@@ -1014,9 +1014,9 @@ select:focus-visible {
   font-weight: 900;
   border: 2px solid rgba(255, 255, 255, 0.65);
   transition:
-    left var(--ball-move-duration, 1100ms) cubic-bezier(0.18, 0.62, 0.28, 1),
-    top var(--ball-move-duration, 1100ms) cubic-bezier(0.18, 0.62, 0.28, 1),
-    transform 1150ms cubic-bezier(0.4, 0, 0.2, 1);
+    left var(--ball-move-duration, 0ms) linear,
+    top var(--ball-move-duration, 0ms) linear,
+    transform 800ms cubic-bezier(0.4, 0, 0.2, 1);
   will-change: left, top, transform;
   backface-visibility: hidden;
   pointer-events: none;
@@ -1439,12 +1439,12 @@ select:focus-visible {
     animation-duration: 0.01ms !important;
   }
   .board-rotor {
-    transition-duration: 1150ms !important;
+    transition-duration: 800ms !important;
   }
   .ball:not(.ball-editable) {
     transition-duration:
-      var(--ball-move-duration, 1100ms),
-      var(--ball-move-duration, 1100ms),
-      1150ms !important;
+      var(--ball-move-duration, 0ms),
+      var(--ball-move-duration, 0ms),
+      800ms !important;
   }
 }
