@@ -39,6 +39,7 @@ type SavedQuestion = {
   beads: BeadConfig[];
   turnCount: number;
   rotations: Rotation[];
+  presetWalls?: WallGrid;
   puzzle?: Puzzle;
   solutions?: Puzzle[];
   selectedSolutionIndex?: number;
@@ -94,7 +95,12 @@ function defaultLibraryName(prefix: string, nextIndex: number) {
   return `${prefix} ${nextIndex}`;
 }
 
-function questionFingerprint(value: Pick<SavedQuestion | SavedBoard, "size" | "beads" | "rotations">) {
+function questionFingerprint(value: {
+  size: number;
+  beads: BeadConfig[];
+  rotations: Rotation[];
+  presetWalls?: WallGrid;
+}) {
   return JSON.stringify({
     size: value.size,
     beads: value.beads.map((bead) => ({
@@ -103,6 +109,7 @@ function questionFingerprint(value: Pick<SavedQuestion | SavedBoard, "size" | "b
       exit: bead.exit,
     })),
     rotations: value.rotations,
+    presetWalls: value.presetWalls ?? makeAnswerWalls(value.size, value.beads),
   });
 }
 
@@ -111,6 +118,9 @@ function normalizeSavedLibraries(rawQuestions: unknown, rawBoards: unknown): Sav
     .filter((item): item is SavedQuestion => Boolean(item && typeof item === "object"))
     .map((item) => ({
       ...item,
+      presetWalls: item.presetWalls
+        ? cloneWalls(item.presetWalls)
+        : makeAnswerWalls(item.size, item.beads),
       answers: Array.isArray(item.answers) ? item.answers : [],
     }));
   const legacyBoards = (Array.isArray(rawBoards) ? rawBoards : [])
@@ -131,6 +141,9 @@ function normalizeSavedLibraries(rawQuestions: unknown, rawBoards: unknown): Sav
         beads: structuredClone(board.beads),
         turnCount: board.rotations.length,
         rotations: [...board.rotations],
+        presetWalls: board.puzzle?.presetWalls
+          ? cloneWalls(board.puzzle.presetWalls)
+          : makeAnswerWalls(board.size, board.beads),
         puzzle: board.puzzle ? structuredClone(board.puzzle) : undefined,
         solutions: board.puzzle ? [structuredClone(board.puzzle)] : undefined,
         selectedSolutionIndex: board.puzzle ? 0 : undefined,
@@ -201,6 +214,11 @@ function normalizeSharedQuestion(value: unknown, tokenSuffix: string): SavedQues
   return {
     ...item,
     id: item.id || `shared-${tokenSuffix}`,
+    presetWalls: item.presetWalls
+      ? cloneWalls(item.presetWalls)
+      : item.puzzle?.presetWalls
+        ? cloneWalls(item.puzzle.presetWalls)
+        : makeAnswerWalls(item.size, item.beads),
     answers: Array.isArray(item.answers) ? item.answers.slice(0, 50) : [],
   };
 }
@@ -377,12 +395,14 @@ function fullyWalledAnswer(size: number, beads: BeadConfig[]): WallGrid {
 function Board({
   size,
   walls,
+  presetWalls,
   beads,
   positions,
   angle,
   editStarts,
   editExits,
   editWalls,
+  lockPresetWalls,
   tool,
   activeColor,
   onEdge,
@@ -392,12 +412,14 @@ function Board({
 }: {
   size: number;
   walls: WallGrid;
+  presetWalls: WallGrid;
   beads: BeadConfig[];
   positions: Partial<Record<Color, { r: number; c: number } | null>>;
   angle: number;
   editStarts: boolean;
   editExits: boolean;
   editWalls: boolean;
+  lockPresetWalls: boolean;
   tool: Tool;
   activeColor: Color;
   onEdge: (kind: EdgeKind, row: number, col: number) => void;
@@ -464,16 +486,19 @@ function Board({
             row.map((active, c) => {
               const boundary = r === 0 || r === size;
               const configuredExit = exits.get(edgeId("h", r, c));
-              const enabled = editWalls ? !boundary : editExits && boundary;
+              const preset = active && presetWalls.h[r][c];
+              const enabled = editWalls
+                ? !boundary && !(lockPresetWalls && preset)
+                : editExits && boundary;
               return (
                 <button
                   type="button"
                   key={`h-${r}-${c}`}
-                  className={`edge horizontal ${active ? "active" : "open"} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("h", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge horizontal ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("h", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, width: `${step}%` }}
                   onClick={() => onEdge("h", r, c)}
                   disabled={!enabled}
-                  aria-label={`${boundary ? "边界" : "横向边线"}，${configuredExit ? "所有珠子的共用出口" : trunkWalls.has(edgeId("h", r, c)) ? "共用主通道侧墙" : active ? "有墙" : "无墙"}`}
+                  aria-label={`${boundary ? "边界" : "横向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : trunkWalls.has(edgeId("h", r, c)) ? "共用主通道侧墙" : active ? "作答新增挡板" : "无墙"}`}
                 />
               );
             }),
@@ -482,16 +507,19 @@ function Board({
             row.map((active, c) => {
               const boundary = c === 0 || c === size;
               const configuredExit = exits.get(edgeId("v", r, c));
-              const enabled = editWalls ? !boundary : editExits && boundary;
+              const preset = active && presetWalls.v[r][c];
+              const enabled = editWalls
+                ? !boundary && !(lockPresetWalls && preset)
+                : editExits && boundary;
               return (
                 <button
                   type="button"
                   key={`v-${r}-${c}`}
-                  className={`edge vertical ${active ? "active" : "open"} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("v", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge vertical ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("v", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, height: `${step}%` }}
                   onClick={() => onEdge("v", r, c)}
                   disabled={!enabled}
-                  aria-label={`${boundary ? "边界" : "纵向边线"}，${configuredExit ? "所有珠子的共用出口" : trunkWalls.has(edgeId("v", r, c)) ? "共用主通道侧墙" : active ? "有墙" : "无墙"}`}
+                  aria-label={`${boundary ? "边界" : "纵向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : trunkWalls.has(edgeId("v", r, c)) ? "共用主通道侧墙" : active ? "作答新增挡板" : "无墙"}`}
                 />
               );
             }),
@@ -539,6 +567,7 @@ export default function Home() {
   const [solutions, setSolutions] = useState<Puzzle[]>([]);
   const [draggedColor, setDraggedColor] = useState<Color | null>(null);
   const [walls, setWalls] = useState<WallGrid>(() => makeAnswerWalls(10, defaultBeads(10)));
+  const [presetWalls, setPresetWalls] = useState<WallGrid>(() => makeAnswerWalls(10, defaultBeads(10)));
   const [undoStack, setUndoStack] = useState<WallGrid[]>([]);
   const [tool, setTool] = useState<Tool>("wall");
   const [source, setSource] = useState<BoardSource>("answer");
@@ -563,6 +592,7 @@ export default function Home() {
 
   const activeBead = beads.find((bead) => bead.color === activeColor) ?? beads[0];
   const displayedWalls = source === "reference" && puzzle ? puzzle.referenceWalls : walls;
+  const displayedPresetWalls = puzzle?.presetWalls ?? presetWalls;
   const playbackBeads = puzzle?.beads ?? beads;
   const activeRotations = puzzle?.rotations ?? plannedRotations;
   const playbackTurnCount = activeRotations.length;
@@ -575,6 +605,8 @@ export default function Home() {
     () => boardStats(displayedWalls, playbackBeads, activeRotations),
     [activeRotations, displayedWalls, playbackBeads],
   );
+  const presetPanelCount = countInternalPanels(displayedPresetWalls);
+  const addedPanelCount = Math.max(0, currentStats.panelCount - presetPanelCount);
   const selectedSavedQuestion = savedQuestions.find((item) => item.id === selectedQuestionId) ?? null;
   const relatedSavedBoards = selectedSavedQuestion?.answers ?? [];
   const selectedSavedBoard = relatedSavedBoards.find((item) => item.id === selectedBoardId) ?? null;
@@ -719,8 +751,10 @@ export default function Home() {
     if (puzzle) return;
     const safe = Math.max(5, Math.min(16, nextSize));
     const nextBeads = resizeBeads(beads, size, safe);
+    const nextPresetWalls = makeAnswerWalls(safe, nextBeads);
     setBeads(nextBeads);
-    setWalls(makeAnswerWalls(safe, nextBeads));
+    setPresetWalls(nextPresetWalls);
+    setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSize(safe);
     setRound(0);
@@ -766,6 +800,7 @@ export default function Home() {
     beadsRef.current = movedBeads;
     setBeads(movedBeads);
     setWalls((current) => syncBeadSupportWalls(current, currentBeads, movedBeads));
+    setPresetWalls((current) => syncBeadSupportWalls(current, currentBeads, movedBeads));
     setDisplayPositions((current) => ({ ...current, [color]: { r: row, c: col } }));
     setRound(0);
     setPlaying(false);
@@ -818,6 +853,8 @@ export default function Home() {
       }
     }
     const next = [...beads, { color, start, exit }];
+    setWalls((current) => syncBeadSupportWalls(current, beads, next));
+    setPresetWalls((current) => syncBeadSupportWalls(current, beads, next));
     setBeads(next);
     setDropTargets(evenlySpacedDropRounds(next, turnCount));
     setActiveColor(color);
@@ -827,6 +864,8 @@ export default function Home() {
   function removeBead(color: Color) {
     if (puzzle || beads.length <= 1) return;
     const next = beads.filter((bead) => bead.color !== color);
+    setWalls((current) => syncBeadSupportWalls(current, beads, next));
+    setPresetWalls((current) => syncBeadSupportWalls(current, beads, next));
     setBeads(next);
     setDropTargets(evenlySpacedDropRounds(next, turnCount));
     if (activeColor === color) setActiveColor(next[0].color);
@@ -880,6 +919,7 @@ export default function Home() {
       if (kind === "h") next.h[row][col] = !next.h[row][col];
       else next.v[row][col] = !next.v[row][col];
       setWalls(next);
+      setPresetWalls(cloneWalls(next));
       setRound(0);
       setPlaying(false);
       setValidation(null);
@@ -937,7 +977,9 @@ export default function Home() {
       lastAnimatedRound.current = 0;
       setDropTargets({ ...result.dropRounds });
       setPuzzle(result);
-      setWalls(makeAnswerWalls(size, result.beads));
+      const resultPresetWalls = result.presetWalls ?? presetWalls;
+      setPresetWalls(cloneWalls(resultPresetWalls));
+      setWalls(cloneWalls(resultPresetWalls));
       setUndoStack([]);
       setSource("reference");
       setRound(0);
@@ -989,6 +1031,7 @@ export default function Home() {
       turnCount,
       rotations: plannedRotations,
       optimizePanels,
+      presetWalls: cloneWalls(presetWalls),
     });
   }
 
@@ -1007,7 +1050,9 @@ export default function Home() {
     setDisplayPositions(positionsFromBeads(next.beads));
     setDisplayAngle(0);
     lastAnimatedRound.current = 0;
-    setWalls(makeAnswerWalls(next.size, next.beads));
+    const nextPresetWalls = next.presetWalls ?? makeAnswerWalls(next.size, next.beads);
+    setPresetWalls(cloneWalls(nextPresetWalls));
+    setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSource("reference");
     setRound(0);
@@ -1019,9 +1064,11 @@ export default function Home() {
   }
 
   function resetSetup() {
+    const nextPresetWalls = puzzle?.presetWalls ?? presetWalls;
     setPuzzle(null);
     setSolutions([]);
-    setWalls(makeAnswerWalls(size, beads));
+    setPresetWalls(cloneWalls(nextPresetWalls));
+    setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSource("answer");
     setRound(0);
@@ -1032,7 +1079,12 @@ export default function Home() {
 
   function fillWalls(filled: boolean) {
     setUndoStack((stack) => [...stack.slice(-39), cloneWalls(walls)]);
-    setWalls(filled ? fullyWalledAnswer(size, puzzle?.beads ?? beads) : makeAnswerWalls(size, puzzle?.beads ?? beads));
+    const basePresetWalls = puzzle?.presetWalls ?? presetWalls;
+    const next = filled
+      ? fullyWalledAnswer(size, puzzle?.beads ?? beads)
+      : puzzle ? cloneWalls(basePresetWalls) : makeAnswerWalls(size, beads);
+    setWalls(next);
+    if (!puzzle) setPresetWalls(cloneWalls(next));
     setValidation(null);
     setRound(0);
   }
@@ -1041,6 +1093,7 @@ export default function Home() {
     const previous = undoStack[undoStack.length - 1];
     if (!previous) return;
     setWalls(previous);
+    if (!puzzle) setPresetWalls(cloneWalls(previous));
     setUndoStack((stack) => stack.slice(0, -1));
     setValidation(null);
   }
@@ -1054,6 +1107,7 @@ export default function Home() {
       beads: structuredClone(beads),
       turnCount,
       rotations: [...plannedRotations],
+      presetWalls: cloneWalls(presetWalls),
       puzzle: puzzle ? structuredClone(puzzle) : undefined,
       solutions: solutions.length > 0 ? structuredClone(solutions) : undefined,
       selectedSolutionIndex: puzzle ? Math.max(0, solutions.indexOf(puzzle)) : undefined,
@@ -1086,10 +1140,22 @@ export default function Home() {
 
   function applySavedQuestion(item: SavedQuestion) {
     const nextBeads = structuredClone(item.beads);
-    const nextSolutions = item.solutions?.length ? structuredClone(item.solutions) : [];
+    const nextPresetWalls = item.presetWalls
+      ? cloneWalls(item.presetWalls)
+      : item.puzzle?.presetWalls
+        ? cloneWalls(item.puzzle.presetWalls)
+        : makeAnswerWalls(item.size, nextBeads);
+    const nextSolutions = item.solutions?.length
+      ? structuredClone(item.solutions).map((solution) => ({
+        ...solution,
+        presetWalls: solution.presetWalls ?? cloneWalls(nextPresetWalls),
+      }))
+      : [];
     const nextPuzzle = nextSolutions.length > 0
       ? nextSolutions[Math.min(item.selectedSolutionIndex ?? 0, nextSolutions.length - 1)]
-      : item.puzzle ? structuredClone(item.puzzle) : null;
+      : item.puzzle
+        ? { ...structuredClone(item.puzzle), presetWalls: item.puzzle.presetWalls ?? cloneWalls(nextPresetWalls) }
+        : null;
     setSize(item.size);
     setBeads(nextBeads);
     setActiveColor(nextBeads[0]?.color ?? "red");
@@ -1097,7 +1163,8 @@ export default function Home() {
     setPlannedRotations([...item.rotations]);
     setPuzzle(nextPuzzle);
     setSolutions(nextSolutions.length > 0 ? nextSolutions : nextPuzzle ? [nextPuzzle] : []);
-    setWalls(makeAnswerWalls(item.size, nextBeads));
+    setPresetWalls(nextPresetWalls);
+    setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSource("answer");
     setSetupMode(nextPuzzle ? "walls" : "start");
@@ -1218,7 +1285,12 @@ export default function Home() {
       return;
     }
     const nextBeads = structuredClone(item.beads);
-    const nextPuzzle = item.puzzle ? structuredClone(item.puzzle) : null;
+    const nextPresetWalls = item.puzzle?.presetWalls
+      ?? selectedSavedQuestion?.presetWalls
+      ?? makeAnswerWalls(item.size, nextBeads);
+    const nextPuzzle = item.puzzle
+      ? { ...structuredClone(item.puzzle), presetWalls: item.puzzle.presetWalls ?? cloneWalls(nextPresetWalls) }
+      : null;
     setSize(item.size);
     setBeads(nextBeads);
     setActiveColor(nextBeads[0]?.color ?? "red");
@@ -1226,6 +1298,7 @@ export default function Home() {
     setPlannedRotations([...item.rotations]);
     setPuzzle(nextPuzzle);
     setSolutions(nextPuzzle ? [nextPuzzle] : []);
+    setPresetWalls(cloneWalls(nextPresetWalls));
     setWalls(cloneWalls(item.walls));
     setUndoStack([]);
     setSource(item.kind === "generated" && nextPuzzle ? "reference" : "answer");
@@ -1321,7 +1394,13 @@ export default function Home() {
         ) throw new Error();
         const shared = value.beads[0].exit;
         const normalizedBeads = value.beads.map((bead) => ({ ...bead, exit: { cell: { ...shared.cell }, direction: shared.direction } }));
-        const normalized = { ...value, beads: normalizedBeads, panelCount: value.panelCount ?? countInternalPanels(value.referenceWalls) };
+        const nextPresetWalls = value.presetWalls ?? makeAnswerWalls(value.size, normalizedBeads);
+        const normalized = {
+          ...value,
+          beads: normalizedBeads,
+          presetWalls: cloneWalls(nextPresetWalls),
+          panelCount: value.panelCount ?? countInternalPanels(value.referenceWalls),
+        };
         setPuzzle(normalized);
         setSolutions([normalized]);
         setSize(value.size);
@@ -1333,7 +1412,8 @@ export default function Home() {
         setDisplayPositions(positionsFromBeads(normalizedBeads));
         setDisplayAngle(0);
         lastAnimatedRound.current = 0;
-        setWalls(makeAnswerWalls(value.size, normalizedBeads));
+        setPresetWalls(cloneWalls(nextPresetWalls));
+        setWalls(cloneWalls(nextPresetWalls));
         setSource("answer");
         setRound(0);
         setValidation(null);
@@ -1517,14 +1597,14 @@ export default function Home() {
             <div className="placement-switch">
               <button className={setupMode === "start" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("start")}>放起点</button>
               <button className={setupMode === "exit" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("exit")}>放共用出口</button>
-              <button className={setupMode === "walls" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("walls")}>放挡板试玩</button>
+              <button className={setupMode === "walls" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("walls")}>预置挡板</button>
             </div>
             <p className="placement-help">
               {setupMode === "start"
                 ? <>当前：<b>{COLOR_LABEL[activeBead.color]}珠</b> · 点击或拖动珠子换格</>
                 : setupMode === "exit"
                   ? <>当前共用出口：<b>{exitLabel(beads[0].exit)}</b> · 点击盘面最外侧边线</>
-                  : <>点击网格线放挡板；在右侧设置每一轮顺/逆 90° 并直接播放</>}
+                  : <>点击网格线预置题目挡板，再点一次取消；这些挡板会固定保留在所有作答和系统解中</>}
             </p>
           </section>
 
@@ -1562,25 +1642,28 @@ export default function Home() {
 
         <section className="board-panel">
           <div className="board-toolbar">
-            <div><p className="section-kicker">{puzzle ? "绘制与验证" : setupMode === "start" ? "自由放置起点" : setupMode === "exit" ? "设置共用出口" : "自由放挡板试玩"}</p><h2>{puzzle ? source === "answer" ? "你的迷宫" : "参考迷宫" : `${size}×${size} 自定义盘面`}</h2></div>
+            <div><p className="section-kicker">{puzzle ? "绘制与验证" : setupMode === "start" ? "自由放置起点" : setupMode === "exit" ? "设置共用出口" : "预置题面挡板"}</p><h2>{puzzle ? source === "answer" ? "你的迷宫" : "参考迷宫" : `${size}×${size} 自定义盘面`}</h2></div>
             <div className="board-toolbar-actions">
-              <div className="board-stat-pill"><span>当前插板</span><strong>{currentStats.panelCount}</strong><small>块</small></div>
+              <div className="board-stat-pill"><span>插板</span><strong>{currentStats.panelCount}</strong><small>预置 {presetPanelCount} · 新增 {addedPanelCount}</small></div>
               {puzzle && <div className="source-switch"><button className={source === "answer" ? "selected" : ""} onClick={() => { setSource("answer"); setRound(0); }}>我的答案</button><button className={source === "reference" ? "selected" : ""} onClick={() => { setSource("reference"); setRound(0); }}>查看参考</button></div>}
             </div>
           </div>
 
-          {!puzzle && setupMode === "walls" && <div className="drawing-tools"><div className="toggle-wall-hint">单击网格线放置挡板，再点一次取消</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>清空内墙</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
-          {puzzle && source === "answer" && <div className="drawing-tools"><div className="tool-group"><button className={tool === "wall" ? "selected" : ""} onClick={() => setTool("wall")}><span className="wall-icon" />画墙</button><button className={tool === "erase" ? "selected" : ""} onClick={() => setTool("erase")}><span className="eraser-icon" />擦除内墙</button></div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>清空内墙</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
+          {!puzzle && setupMode === "walls" && <div className="drawing-tools"><div className="toggle-wall-hint">单击网格线预置挡板，再点一次取消；珠子托板也属于预置挡板</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>只留托板</button><button onClick={() => fillWalls(true)}>全部预置</button></div></div>}
+          {puzzle && source === "answer" && <div className="drawing-tools"><div className="tool-group"><button className={tool === "wall" ? "selected" : ""} onClick={() => setTool("wall")}><span className="wall-icon" />新增挡板</button><button className={tool === "erase" ? "selected" : ""} onClick={() => setTool("erase")}><span className="eraser-icon" />擦除新增</button></div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>恢复预置</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
+          {(setupMode === "walls" || puzzle) && <div className="wall-legend" aria-label="挡板颜色说明"><span><i className="preset-swatch" />陶色：题目预置，不可移除</span><span><i className="answer-swatch" />深色：作答或系统新增</span></div>}
 
           <Board
             size={size}
             walls={displayedWalls}
+            presetWalls={displayedPresetWalls}
             beads={puzzle?.beads ?? beads}
             positions={boardPositions}
             angle={displayAngle}
             editStarts={!puzzle && setupMode === "start"}
             editExits={!puzzle && setupMode === "exit"}
             editWalls={(!puzzle && setupMode === "walls") || Boolean(puzzle && source === "answer")}
+            lockPresetWalls={Boolean(puzzle)}
             tool={tool}
             activeColor={activeColor}
             onEdge={editEdge}
@@ -1655,7 +1738,7 @@ export default function Home() {
 
       {validation && <div className={`validation-toast ${validation.ok ? "success" : "warning"}`}><button className="toast-close" onClick={() => setValidation(null)}>×</button><p className="section-kicker">规则验证</p><h3>{validation.title}</h3><ul>{validation.details.map((detail) => <li key={detail}>{detail}</li>)}</ul>{validation.ok && <button onClick={() => setPlaying(true)}>播放我的答案</button>}</div>}
 
-      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>固定五珠。</b>红、黄、蓝、绿、紫五颗珠子必须按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>必须经过共用主通道。</b>各珠支路可从汇流口的侧面或后方进入；汇流口之后形成连续主通道，并由插板约束到同一出口。</li><li><b>禁止单通道。</b>全部起点与出口必须接入同一共享迷宫，且至少包含一个三向或四向分叉点，不能用五条彼此隔离的通道作答。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>正解、轮数、插板三级排序。</b>程序先验证完整正解，再从理论最早离场轮数开始逐轮搜索；首次找到完整解后，只在这个最短轮数内比较插板数量并生成路线不同的独立解。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
+      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>固定五珠。</b>红、黄、蓝、绿、紫五颗珠子必须按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>题目可预置挡板。</b>出题时可在初始盘面预先放置插板；陶色挡板（包括每颗珠子的起点托板）属于题目条件，选手不可移除，系统解也必须保留。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>必须经过共用主通道。</b>各珠支路可从汇流口的侧面或后方进入；汇流口之后形成连续主通道，并由插板约束到同一出口。</li><li><b>禁止单通道。</b>全部起点与出口必须接入同一共享迷宫，且至少包含一个三向或四向分叉点，不能用五条彼此隔离的通道作答。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>正解、轮数、插板三级排序。</b>程序先验证完整正解，再从理论最早离场轮数开始逐轮搜索；首次找到完整解后，只在这个最短轮数内比较插板数量并生成路线不同的独立解。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
     </main>
   );
 }

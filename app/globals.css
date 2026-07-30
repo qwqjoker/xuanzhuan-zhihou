@@ -769,11 +769,12 @@ select:focus-visible {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.74);
   white-space: nowrap;
+  flex-wrap: wrap;
 }
 
 .board-stat-pill span { color: var(--muted); font-size: 9px; }
 .board-stat-pill strong { color: var(--green); font-size: 18px; }
-.board-stat-pill small { color: var(--muted); font-size: 9px; }
+.board-stat-pill small { color: var(--muted); font-size: 9px; flex-basis: 100%; }
 
 .source-switch {
   display: flex;
@@ -943,6 +944,10 @@ select:focus-visible {
 .edge.vertical::after { top: 0; bottom: 0; left: 5px; width: 4px; }
 .edge.active::after { background: var(--ink); box-shadow: 0 1px 1px rgba(0, 0, 0, 0.2); }
 .edge.active.common-channel-wall::after { background: var(--green-bright); }
+.edge.active.preset-wall::after {
+  background: #c56f48;
+  box-shadow: 0 1px 1px rgba(91, 46, 27, 0.28), 0 0 0 1px rgba(255, 245, 231, 0.72);
+}
 .edge.open.boundary::after { background: #e7a754; }
 .edge.configured-exit::after { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.82), 0 0 0 5px currentColor; }
 .edge.exit-red { color: var(--red); }
@@ -964,6 +969,34 @@ select:focus-visible {
 .edge.vertical.open.boundary::before { inset: 0 2px; }
 .edge:not(:disabled):hover::after { background: var(--green-bright); box-shadow: 0 0 0 3px rgba(36, 108, 81, 0.16); }
 .edge.tool-erase:not(:disabled):hover::after { background: #d88478; }
+.edge.active.preset-wall:disabled { opacity: 1; }
+
+.wall-legend {
+  width: min(100%, 680px);
+  margin: 3px auto -4px;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.wall-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wall-legend i {
+  display: inline-block;
+  width: 20px;
+  height: 4px;
+  border-radius: 99px;
+}
+
+.preset-swatch { background: #c56f48; }
+.answer-swatch { background: var(--ink); }
 
 .ball {
   width: 6.4%;

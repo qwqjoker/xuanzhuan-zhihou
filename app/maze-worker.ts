@@ -5,12 +5,14 @@ import {
   Color,
   Puzzle,
   Rotation,
+  WallGrid,
   countInternalPanels,
   distinctRotationPatterns,
   generateAutomaticPuzzle,
   internalPanelKeys,
   isIndependentPuzzleSolution,
   isLocallyMinimalPuzzleSolution,
+  minimizePuzzleRounds,
   minimizePuzzleWalls,
 } from "./maze";
 
@@ -22,6 +24,7 @@ type GenerateRequest = {
   turnCount: number;
   rotations: Rotation[];
   optimizePanels: boolean;
+  presetWalls: WallGrid;
 };
 
 type WorkerResponse =
@@ -40,9 +43,18 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
   const puzzles: Puzzle[] = [];
   const candidateSignatures = new Set<string>();
   const panelCandidateTarget = request.optimizePanels ? 6 : 3;
+  const requiredWallKeys = internalPanelKeys(request.presetWalls);
   const optimize = (puzzle: Puzzle) => {
-    const minimized = minimizePuzzleWalls(puzzle, request.optimizePanels ? 12 : 4);
-    return { ...minimized, panelCount: countInternalPanels(minimized.referenceWalls) };
+    const roundMinimized = minimizePuzzleRounds(
+      puzzle,
+      Math.min(request.turnCount, puzzle.turnCount),
+    );
+    const panelMinimized = minimizePuzzleWalls(
+      roundMinimized,
+      request.optimizePanels ? 12 : 4,
+    );
+    const verified = minimizePuzzleRounds(panelMinimized, roundMinimized.turnCount);
+    return { ...verified, panelCount: countInternalPanels(verified.referenceWalls) };
   };
   const accept = (puzzle: Puzzle | null) => {
     if (!puzzle) return false;
@@ -81,6 +93,7 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
       [],
       undefined,
       completionTurnLimit,
+      requiredWallKeys,
     );
   const generateAutomatic = (
     planningHorizon: number,
@@ -99,9 +112,14 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     [],
     undefined,
     completionTurnLimit,
+    requiredWallKeys,
   );
   const preview = (puzzle: Puzzle, message: string) => {
-    const quicklyReduced = minimizePuzzleWalls(puzzle, 1);
+    const roundMinimized = minimizePuzzleRounds(
+      puzzle,
+      Math.min(request.turnCount, puzzle.turnCount),
+    );
+    const quicklyReduced = minimizePuzzleWalls(roundMinimized, 1);
     send({
       type: "partial",
       puzzles: [{
@@ -138,6 +156,10 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     }
   }
   if (firstCorrectPuzzle) {
+    firstCorrectPuzzle = minimizePuzzleRounds(
+      firstCorrectPuzzle,
+      Math.min(request.turnCount, firstCorrectPuzzle.turnCount),
+    );
     preview(
       firstCorrectPuzzle,
       `已找到并显示 ${firstCorrectPuzzle.turnCount} 轮正解；后台继续检查能否用更少轮完成…`,
@@ -158,17 +180,17 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
       });
       const planningHorizon = Math.max(targetTurns, synthesisTurns);
       let shorter = generatePlanned(planningHorizon, targetTurns, 500);
-      for (let index = 0; index < 1 && !shorter; index += 1) {
+      for (let index = 0; index < 3 && !shorter; index += 1) {
         shorter = generateAutomatic(
           planningHorizon,
           targetTurns,
           automaticOffsets[index],
           index,
-          500,
+          400,
         );
       }
       if (shorter) {
-        firstCorrectPuzzle = shorter;
+        firstCorrectPuzzle = minimizePuzzleRounds(shorter, targetTurns);
         preview(
           shorter,
           `已把正解压缩到 ${shorter.turnCount} 轮；后台开始比较同轮插板数…`,
@@ -237,6 +259,7 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
         [primaryEdges[0]],
         puzzles[0].referenceWalls,
         shortestTurns,
+        requiredWallKeys,
       );
       if (accept(candidate)) {
         productivePatterns.push(pattern);
@@ -276,6 +299,7 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
           [primaryEdges[edgeIndex]],
           puzzles[0].referenceWalls,
           shortestTurns,
+          requiredWallKeys,
         );
         if (accept(candidate)) {
           send({ type: "progress", message: `已比较 ${puzzles.length} 套同轮正解；当前最少 ${Math.min(...puzzles.map((item) => item.panelCount ?? Infinity))} 片插板…` });

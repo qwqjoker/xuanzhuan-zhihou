@@ -34,6 +34,7 @@ export type Puzzle = {
   dropRounds: Partial<Record<Color, number>>;
   paths: MazePath[];
   referenceWalls: WallGrid;
+  presetWalls?: WallGrid;
   solutionLowerBound: number;
   countedSamples: number;
   panelCount?: number;
@@ -135,6 +136,15 @@ export function makeAnswerWalls(size: number, beads: BeadConfig[]): WallGrid {
 
 export function cloneWalls(walls: WallGrid): WallGrid {
   return { h: walls.h.map((row) => [...row]), v: walls.v.map((row) => [...row]) };
+}
+
+function wallsFromRequiredPanels(size: number, beads: BeadConfig[], requiredWallKeys: string[]): WallGrid {
+  const walls = makeAnswerWalls(size, beads);
+  requiredWallKeys.forEach((edgeKey) => {
+    const [kind, row, col] = edgeKey.split("-");
+    walls[kind as "h" | "v"][Number(row)][Number(col)] = true;
+  });
+  return walls;
 }
 
 export function syncBeadSupportWalls(
@@ -526,7 +536,7 @@ function searchRotationSequence(
   return null;
 }
 
-function searchAutomaticRotationSequence(
+export function findShortestRotationSolution(
   walls: WallGrid,
   beads: BeadConfig[],
   order: Color[],
@@ -546,7 +556,6 @@ function searchAutomaticRotationSequence(
         const q = (node.q + (rotation === "cw" ? 1 : 3)) % 4;
         const gravity = ORIENTATION_GRAVITY[q];
         const tilt = tiltBalls(walls, beads, node.positions, gravity);
-        if (tilt.dropEvents.length > 1) continue;
         if (tilt.dropEvents.some((event) => {
           const expected = beads.find((bead) => bead.color === event.color)!.exit;
           return !sameCell(event.exit.cell, expected.cell) || event.exit.direction !== expected.direction;
@@ -554,11 +563,12 @@ function searchAutomaticRotationSequence(
 
         let progress = node.progress;
         const dropRounds = { ...node.dropRounds };
-        if (tilt.dropEvents.length === 1) {
-          const color = tilt.dropEvents[0].color;
-          if (color !== order[progress]) continue;
-          dropRounds[color] = round;
-          progress += 1;
+        if (tilt.dropEvents.length > 0) {
+          const dropped = tilt.dropEvents.map((event) => event.color);
+          const expected = order.slice(progress, progress + dropped.length);
+          if (dropped.join("|") !== expected.join("|")) continue;
+          dropped.forEach((color) => { dropRounds[color] = round; });
+          progress += dropped.length;
           if (progress === order.length) {
             return { rotations: [...node.rotations, rotation], dropRounds };
           }
@@ -580,23 +590,19 @@ function searchAutomaticRotationSequence(
         });
       }
     }
-    nextFrontier.sort((a, b) => {
-      if (a.progress !== b.progress) return b.progress - a.progress;
-      const nextColor = order[a.progress];
-      const bead = beads.find((item) => item.color === nextColor);
-      if (!bead) return 0;
-      const distance = (node: SearchNode) => {
-        const position = node.positions[nextColor];
-        return position
-          ? Math.abs(position.r - bead.exit.cell.r) + Math.abs(position.c - bead.exit.cell.c)
-          : -1;
-      };
-      return distance(a) - distance(b);
-    });
-    frontier = nextFrontier.slice(0, beads.length >= 4 ? 120 : 2400);
+    frontier = nextFrontier;
     if (frontier.length === 0) return null;
   }
   return null;
+}
+
+function searchAutomaticRotationSequence(
+  walls: WallGrid,
+  beads: BeadConfig[],
+  order: Color[],
+  maximumTurns: number,
+): { rotations: Rotation[]; dropRounds: Partial<Record<Color, number>> } | null {
+  return findShortestRotationSolution(walls, beads, order, maximumTurns);
 }
 
 function wallSignature(walls: WallGrid): string {
@@ -1163,9 +1169,10 @@ export function generateAutomaticPuzzle(
   forbiddenWallKeys: string[] = [],
   initialWalls?: WallGrid,
   completionTurnLimit = maximumTurns,
+  requiredWallKeys: string[] = [],
 ): Puzzle | null {
   if (!allBeadsShareExit(beads) || order.length !== beads.length) return null;
-  if (fixedRotations && forbiddenWallKeys.length === 0 && !initialWalls) {
+  if (fixedRotations && forbiddenWallKeys.length === 0 && requiredWallKeys.length === 0 && !initialWalls) {
     const constructed = generatePuzzleForRotations(
       size,
       beads,
@@ -1186,9 +1193,10 @@ export function generateAutomaticPuzzle(
     forbiddenWallKeys,
     initialWalls,
     completionTurnLimit,
+    requiredWallKeys,
   );
   if (settledPuzzle) return settledPuzzle;
-  if (fixedRotations) return null;
+  if (fixedRotations || requiredWallKeys.length > 0) return null;
 
   // Retain the older corridor sampler as a cheap fallback for small layouts.
   // The authoritative simulation below still uses the V3.5 settled-gravity
@@ -1217,6 +1225,7 @@ export function generateAutomaticPuzzle(
       dropRounds: sequence.dropRounds,
       paths,
       referenceWalls,
+      presetWalls: wallsFromRequiredPanels(size, beads, requiredWallKeys),
       solutionLowerBound: 1,
       countedSamples: attempt + 1,
       commonChannelLength: 3,
@@ -1395,6 +1404,7 @@ function fixedSettledWalls(
   size: number,
   beads: BeadConfig[],
   forbiddenWallKeys: string[] = [],
+  requiredWallKeys: string[] = [],
 ): { walls: WallGrid; fixed: Map<string, boolean>; mutable: MutableEdge[] } | null {
   const walls = makeBlankWalls(size, false);
   const fixed = new Map<string, boolean>();
@@ -1427,6 +1437,12 @@ function fixedSettledWalls(
   if (!assign(exit.cell, exit.direction, false)) return null;
   const forbidden = new Set(forbiddenWallKeys);
   if (forbiddenWallKeys.some((edge) => fixed.get(edge) === true)) return null;
+  if (requiredWallKeys.some((edge) => forbidden.has(edge) || fixed.get(edge) === false)) return null;
+  requiredWallKeys.forEach((edgeKey) => {
+    const [kind, row, col] = edgeKey.split("-");
+    fixed.set(edgeKey, true);
+    walls[kind as "h" | "v"][Number(row)][Number(col)] = true;
+  });
 
   const mutable: MutableEdge[] = [];
   for (let r = 1; r < size; r += 1) {
@@ -1576,6 +1592,7 @@ function generateSettledGravityPuzzle(
   forbiddenWallKeys: string[] = [],
   initialWalls?: WallGrid,
   completionTurnLimit = maximumTurns,
+  requiredWallKeys: string[] = [],
 ): Puzzle | null {
   const target = orientationForDirection(beads[0].exit.direction);
   if (fixedRotations) {
@@ -1599,7 +1616,7 @@ function generateSettledGravityPuzzle(
         searchVariant,
         beads.length,
       );
-    const fixedLayout = fixedSettledWalls(size, beads, forbiddenWallKeys);
+    const fixedLayout = fixedSettledWalls(size, beads, forbiddenWallKeys, requiredWallKeys);
     if (!rotations || !fixedLayout) return null;
     const random = seededRandom(
       0x51ed270b ^ size ^ (maximumTurns << 8) ^ (searchVariant << 16)
@@ -1651,6 +1668,7 @@ function generateSettledGravityPuzzle(
           dropRounds,
           paths: pathsFromFrames(beads, frames),
           referenceWalls: best,
+          presetWalls: wallsFromRequiredPanels(size, beads, requiredWallKeys),
           solutionLowerBound: 1,
           countedSamples: (variant + 1) * iterationsPerVariant,
           commonChannelLength: 1,
@@ -1959,6 +1977,14 @@ function openBoundaryKeys(walls: WallGrid): string[] {
 
 export function validateAnswer(puzzle: Puzzle, walls: WallGrid): ValidationResult {
   const details: string[] = [];
+  if (puzzle.presetWalls) {
+    const missingPreset = internalPanelKeys(puzzle.presetWalls)
+      .some((edgeKey) => {
+        const [kind, row, col] = edgeKey.split("-");
+        return !walls[kind as "h" | "v"][Number(row)][Number(col)];
+      });
+    if (missingPreset) details.push("题目预置挡板不可移除，作答盘面必须完整保留。");
+  }
   if (
     puzzle.beads.length !== ALL_COLORS.length
     || !ALL_COLORS.every((color) => puzzle.beads.some((bead) => bead.color === color))
@@ -2072,6 +2098,30 @@ export function countInternalPanels(walls: WallGrid): number {
   return count;
 }
 
+/**
+ * Finds the shortest valid clockwise/counter-clockwise sequence for an
+ * already solved wall layout. This is a breadth-first search over every
+ * reachable board state, so it does not mistake the user's turn ceiling for
+ * the answer length and it keeps all same-round drop events.
+ */
+export function minimizePuzzleRounds(puzzle: Puzzle, maximumTurns = puzzle.turnCount): Puzzle {
+  const sequence = findShortestRotationSolution(
+    puzzle.referenceWalls,
+    puzzle.beads,
+    puzzle.order,
+    Math.max(1, maximumTurns),
+  );
+  if (!sequence) return puzzle;
+  const frames = simulateWalls(puzzle.referenceWalls, puzzle.beads, sequence.rotations);
+  return {
+    ...puzzle,
+    turnCount: sequence.rotations.length,
+    rotations: sequence.rotations,
+    dropRounds: sequence.dropRounds,
+    paths: pathsFromFrames(puzzle.beads, frames),
+  };
+}
+
 export function minimizePuzzleWalls(puzzle: Puzzle, trials = 8): Puzzle {
   type Edge = { kind: "h" | "v"; r: number; c: number };
   const allEdges: Edge[] = [];
@@ -2083,6 +2133,7 @@ export function minimizePuzzleWalls(puzzle: Puzzle, trials = 8): Puzzle {
   }
   let best = cloneWalls(puzzle.referenceWalls);
   let bestCount = countInternalPanels(best);
+  const requiredPanels = new Set(puzzle.presetWalls ? internalPanelKeys(puzzle.presetWalls) : []);
   for (let trial = 0; trial < Math.max(1, trials); trial += 1) {
     const perturbedRestart = trial >= Math.ceil(Math.max(1, trials) / 2);
     const candidate = cloneWalls(perturbedRestart ? best : puzzle.referenceWalls);
@@ -2100,7 +2151,9 @@ export function minimizePuzzleWalls(puzzle: Puzzle, trials = 8): Puzzle {
     let changed = true;
     while (changed) {
       changed = false;
-      const removable = allEdges.filter((edge) => candidate[edge.kind][edge.r][edge.c]);
+      const removable = allEdges.filter((edge) =>
+        candidate[edge.kind][edge.r][edge.c]
+        && !requiredPanels.has(`${edge.kind}-${edge.r}-${edge.c}`));
       const edges = trial === 0 ? removable : shuffled(removable);
       for (const edge of edges) {
         if (!candidate[edge.kind][edge.r][edge.c]) continue;
@@ -2163,7 +2216,9 @@ export function isIndependentPuzzleSolution(candidate: Puzzle, accepted: Puzzle[
 
 export function isLocallyMinimalPuzzleSolution(puzzle: Puzzle): boolean {
   if (!validateAnswer(puzzle, puzzle.referenceWalls).ok) return false;
+  const requiredPanels = new Set(puzzle.presetWalls ? internalPanelKeys(puzzle.presetWalls) : []);
   for (const edge of internalPanelKeys(puzzle.referenceWalls)) {
+    if (requiredPanels.has(edge)) continue;
     const [kind, row, col] = edge.split("-");
     const walls = cloneWalls(puzzle.referenceWalls);
     walls[kind as "h" | "v"][Number(row)][Number(col)] = false;
