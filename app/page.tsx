@@ -1,11 +1,12 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ALL_COLORS,
   BeadConfig,
   COLOR_LABEL,
   Color,
+  DIR_DELTA,
   Exit,
   Puzzle,
   Rotation,
@@ -271,8 +272,13 @@ function positionsFromBeads(beads: BeadConfig[]) {
   return positions;
 }
 
-function framePlaybackDuration() {
-  return 1450;
+function frameMovementDuration(frame: { trajectories: Partial<Record<Color, { r: number; c: number }[]>> }) {
+  const longestPath = Math.max(1, ...Object.values(frame.trajectories).map((path) => path?.length ?? 0));
+  return Math.max(800, Math.min(1700, 520 + Math.max(0, longestPath - 1) * 150));
+}
+
+function framePlaybackDuration(frame: { trajectories: Partial<Record<Color, { r: number; c: number }[]>> }) {
+  return 1200 + frameMovementDuration(frame) + 300;
 }
 
 function edgeId(kind: EdgeKind, row: number, col: number) {
@@ -398,6 +404,7 @@ function Board({
   beads,
   positions,
   angle,
+  moveDuration,
   editStarts,
   editExits,
   editWalls,
@@ -415,6 +422,7 @@ function Board({
   beads: BeadConfig[];
   positions: Partial<Record<Color, { r: number; c: number } | null>>;
   angle: number;
+  moveDuration: number;
   editStarts: boolean;
   editExits: boolean;
   editWalls: boolean;
@@ -449,7 +457,14 @@ function Board({
   return (
     <div className="board-stage">
       <div className="gravity-indicator"><span>重力</span><b>↓</b></div>
-      <div className="board-rotor" data-angle={angle} style={{ transform: `translateZ(0) rotate(${angle}deg)` }}>
+      <div
+        className="board-rotor"
+        data-angle={angle}
+        style={{
+          transform: `translateZ(0) rotate(${angle}deg)`,
+          "--ball-move-duration": `${moveDuration}ms`,
+        } as CSSProperties}
+      >
         <div
           ref={boardRef}
           className="board"
@@ -678,7 +693,7 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       if (finished) setPlaying(false);
       else setRound((value) => value + 1);
-    }, finished ? 0 : framePlaybackDuration());
+    }, finished ? 0 : framePlaybackDuration(currentFrame));
     return () => window.clearTimeout(timer);
   }, [currentFrame, playbackTurnCount, playing, round]);
 
@@ -704,14 +719,32 @@ export default function Home() {
 
       const forwardOneStep = round === previousRound + 1;
       if (!forwardOneStep) {
-        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 680));
+        timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 1180));
         return;
       }
 
-      // Each tilt is one straight movement under a single rule-gravity.
-      // Move directly to the settled cells with a compositor transition
-      // instead of rerendering the whole 10×10 board once per crossed cell.
-      timers.push(window.setTimeout(() => setDisplayPositions(target.positions), 720));
+      const movementDuration = frameMovementDuration(target);
+      const visualTargets = { ...target.positions };
+      target.dropped.forEach((color) => {
+        const bead = playbackBeads.find((item) => item.color === color);
+        if (!bead) return;
+        const path = target.trajectories[color] ?? [];
+        const last = path[path.length - 1] ?? bead.exit.cell;
+        const delta = DIR_DELTA[bead.exit.direction];
+        visualTargets[color] = {
+          r: last.r + delta.r,
+          c: last.c + delta.c,
+        };
+      });
+
+      // First finish the 90-degree turn. Then animate every bead along the
+      // current straight gravity path; dropped beads travel visibly beyond
+      // the shared outlet before they are removed from the board.
+      timers.push(window.setTimeout(() => setDisplayPositions(visualTargets), 1200));
+      timers.push(window.setTimeout(
+        () => setDisplayPositions(target.positions),
+        1200 + movementDuration,
+      ));
     });
     return () => {
       window.cancelAnimationFrame(animationFrame);
@@ -1654,9 +1687,10 @@ export default function Home() {
             beads={puzzle?.beads ?? beads}
             positions={boardPositions}
             angle={displayAngle}
-            editStarts={!puzzle && setupMode === "start"}
-            editExits={!puzzle && setupMode === "exit"}
-            editWalls={(!puzzle && setupMode === "walls") || Boolean(puzzle && source === "answer")}
+            moveDuration={frameMovementDuration(currentFrame)}
+            editStarts={!playing && round === 0 && !puzzle && setupMode === "start"}
+            editExits={!playing && round === 0 && !puzzle && setupMode === "exit"}
+            editWalls={!playing && round === 0 && ((!puzzle && setupMode === "walls") || Boolean(puzzle && source === "answer"))}
             lockPresetWalls={Boolean(puzzle)}
             tool={tool}
             activeColor={activeColor}
