@@ -1781,7 +1781,7 @@ export default function Home() {
           <div className="current-action">{round === 0 ? <p><span>第 0 轮 · 起点就绪</span>每颗珠子正下方都有直接接触的托板；程序从第一次 90° 旋转后开始按离散规则结算</p> : <p><span>第 {round} 次 · {rotationAtRound === "cw" ? "顺时针 90°" : "逆时针 90°"}</span>{currentFrame.movementOrder.length > 0 ? <>盘面定位后移动：{currentFrame.movementOrder.map((color) => `${COLOR_LABEL[color]}珠`).join(" → ")}</> : "定位后珠子未移动"}{currentFrame.blocked.length > 0 && <em>挡板或占位限制：{currentFrame.blocked.map((color) => `${COLOR_LABEL[color]}珠`).join("、")}</em>}{currentFrame.dropped.length > 0 && <b>{currentFrame.dropped.map((color) => `${COLOR_LABEL[color]}珠`).join("、")}掉落</b>}</p>}</div>
           {puzzle ? (
             <>
-              <button className="primary-button" onClick={() => { const result = validateAnswer(puzzle, walls); setValidation(result); setSource("answer"); setRound(0); setNotice(result.ok ? "答案有效，可以播放。" : "已列出需要修改的规则。 "); }}>验证我的迷宫</button>
+              <button className="primary-button" onClick={() => { const result = validateAnswer(puzzle, walls, { requireExactDropRounds: false }); setValidation(result); setSource("answer"); setRound(0); setNotice(result.ok ? "答案有效，可以播放。" : "已列出需要修改的规则。 "); }}>验证我的迷宫</button>
               <button className="secondary-button full" onClick={() => {
                 exportPng(size, displayedWalls, puzzle.beads, currentFrame.positions)
                   .then(() => setNotice("当前盘面 PNG 已生成，请在浏览器下载列表中查看。 "))

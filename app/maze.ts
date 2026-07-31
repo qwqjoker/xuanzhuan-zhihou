@@ -70,6 +70,10 @@ export type ValidationResult = {
   frames?: SimulationFrame[];
 };
 
+export type ValidationOptions = {
+  requireExactDropRounds?: boolean;
+};
+
 export const ALL_COLORS: Color[] = ["red", "yellow", "blue", "green", "purple"];
 
 export const COLOR_LABEL: Record<Color, string> = {
@@ -2083,7 +2087,12 @@ function openBoundaryKeys(walls: WallGrid): string[] {
   return result;
 }
 
-export function validateAnswer(puzzle: Puzzle, walls: WallGrid): ValidationResult {
+export function validateAnswer(
+  puzzle: Puzzle,
+  walls: WallGrid,
+  options: ValidationOptions = {},
+): ValidationResult {
+  const requireExactDropRounds = options.requireExactDropRounds ?? true;
   const details: string[] = [];
   if (puzzle.presetWalls) {
     const missingPreset = internalPanelKeys(puzzle.presetWalls)
@@ -2163,13 +2172,15 @@ export function validateAnswer(puzzle: Puzzle, walls: WallGrid): ValidationResul
     });
     if (frame.round > 0) frame.dropped.forEach((color) => { actualRounds[color] = frame.round; });
   });
-  puzzle.beads.forEach((bead) => {
-    const actual = actualRounds[bead.color] ?? 0;
-    const expected = puzzle.dropRounds[bead.color] ?? 0;
-    if (actual !== expected) {
-      details.push(`${COLOR_LABEL[bead.color]}珠实际${actual ? `在第 ${actual} 次` : "未"}掉落，目标是第 ${expected} 次。`);
-    }
-  });
+  if (requireExactDropRounds) {
+    puzzle.beads.forEach((bead) => {
+      const actual = actualRounds[bead.color] ?? 0;
+      const expected = puzzle.dropRounds[bead.color] ?? 0;
+      if (actual !== expected) {
+        details.push(`${COLOR_LABEL[bead.color]}珠实际${actual ? `在第 ${actual} 次` : "未"}掉落，目标是第 ${expected} 次。`);
+      }
+    });
+  }
   if (actualOrder.join("|") !== puzzle.order.join("|")) {
     details.push(
       `实际掉落顺序为${actualOrder.length ? actualOrder.map((color) => COLOR_LABEL[color]).join("、") : "空"}，目标顺序为${puzzle.order.map((color) => COLOR_LABEL[color]).join("、")}。`,
