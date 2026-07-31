@@ -1086,6 +1086,13 @@ export default function Home() {
       rotations: plannedRotations,
       optimizePanels,
       presetWalls: cloneWalls(presetWalls),
+      seedWalls: [
+        cloneWalls(walls),
+        ...solutions.map((solution) => cloneWalls(solution.referenceWalls)),
+        ...relatedSavedBoards.map((board) => cloneWalls(board.walls)),
+      ].filter((candidate, index, candidates) => (
+        candidates.findIndex((item) => JSON.stringify(item) === JSON.stringify(candidate)) === index
+      )).slice(0, 24),
     });
   }
 

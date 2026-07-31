@@ -12,6 +12,7 @@ import {
   isIndependentPuzzleSolution,
   isLocallyMinimalPuzzleSolution,
   minimizePuzzleWalls,
+  puzzleFromSolvedWalls,
   puzzleCompletionRound,
 } from "./maze";
 
@@ -24,6 +25,7 @@ type GenerateRequest = {
   rotations: Rotation[];
   optimizePanels: boolean;
   presetWalls: WallGrid;
+  seedWalls?: WallGrid[];
 };
 
 type WorkerResponse =
@@ -117,9 +119,32 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     }
   });
 
+  // Treat the player's current board and this question's saved answers as
+  // verified upper bounds. Automatic search must never report a result that is
+  // slower than a valid solution the user has already made.
+  const seededPuzzles = (request.seedWalls ?? [])
+    .map((seedWalls) => puzzleFromSolvedWalls(
+      request.size,
+      request.beads,
+      request.order,
+      prescribedRotations,
+      seedWalls,
+      request.presetWalls,
+    ))
+    .filter((puzzle): puzzle is Puzzle => Boolean(puzzle))
+    .sort((a, b) =>
+      puzzleCompletionRound(a) - puzzleCompletionRound(b)
+      || countInternalPanels(a.referenceWalls) - countInternalPanels(b.referenceWalls));
+
   // Stage 1: find one valid solution quickly while preserving every prescribed
   // round. Later rounds remain part of the question even after all beads leave.
-  let bestPuzzle: Puzzle | null = null;
+  let bestPuzzle: Puzzle | null = seededPuzzles[0] ?? null;
+  if (bestPuzzle) {
+    preview(
+      bestPuzzle,
+      `已采用当前题目中已验证的第 ${puzzleCompletionRound(bestPuzzle)} 轮方案作为基准，继续搜索更少轮次。`,
+    );
+  }
   for (let index = 0; index < variantOffsets.length && !bestPuzzle; index += 1) {
     bestPuzzle = generate(
       request.turnCount,
@@ -145,10 +170,10 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
       message: `已有正解；正在验证是否能在第 ${targetRound} 轮全部完成…`,
     });
     let shorter: Puzzle | null = null;
-    for (let index = 0; index < Math.min(2, variantOffsets.length) && !shorter; index += 1) {
+    for (let index = 0; index < Math.min(4, variantOffsets.length) && !shorter; index += 1) {
       shorter = generate(
         targetRound,
-        request.beads.length >= 4 ? 700 : 450,
+        request.beads.length >= 4 ? 900 : 550,
         variantOffsets[index] + targetRound * 53,
       );
     }
@@ -164,7 +189,13 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
 
   // Stage 3: only after completion length is fixed do panel count and
   // independent route families participate in ranking.
-  if (bestPuzzle) accept(bestPuzzle);
+  if (bestPuzzle) {
+    accept(bestPuzzle);
+    const bestRound = puzzleCompletionRound(bestPuzzle);
+    seededPuzzles
+      .filter((candidate) => puzzleCompletionRound(candidate) === bestRound)
+      .forEach((candidate) => accept(candidate));
+  }
   if (puzzles.length > 0) {
     const shortestRound = Math.min(...puzzles.map(puzzleCompletionRound));
     send({

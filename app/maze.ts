@@ -722,68 +722,41 @@ function gravitiesForRotations(rotations: Rotation[]): Direction[] {
   return gravities;
 }
 
-function sweepStops(
+function gravityStops(
   cell: Cell,
-  previousGravity: Direction,
-  nextGravity: Direction,
+  gravity: Direction,
   size: number,
 ): Cell[] {
-  const queue: Cell[] = [{ ...cell }];
-  const visited = new Set<string>([key(cell)]);
-  const result: Cell[] = [];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    result.push(current);
-    for (const direction of [nextGravity, previousGravity]) {
-      const next = {
-        r: current.r + DIR_DELTA[direction].r,
-        c: current.c + DIR_DELTA[direction].c,
-      };
-      if (inside(next, size) && !visited.has(key(next))) {
-        visited.add(key(next));
-        queue.push(next);
-      }
-    }
+  const result: Cell[] = [{ ...cell }];
+  let cursor = { ...cell };
+  while (true) {
+    const next = {
+      r: cursor.r + DIR_DELTA[gravity].r,
+      c: cursor.c + DIR_DELTA[gravity].c,
+    };
+    if (!inside(next, size)) break;
+    result.push(next);
+    cursor = next;
   }
   return result;
 }
 
-function coordinateMatches(a: Cell, b: Cell, direction: Direction): boolean {
-  return direction === "up" || direction === "down" ? a.r === b.r : a.c === b.c;
-}
-
-function imposeSweepStop(
+function imposeGravityStop(
   base: Map<string, boolean>,
   from: Cell,
   stop: Cell,
-  previousGravity: Direction,
-  nextGravity: Direction,
+  gravity: Direction,
 ): Map<string, boolean> | null {
   const assignments = new Map(base);
   let cursor = { ...from };
-  while (!coordinateMatches(cursor, stop, nextGravity)) {
-    if (!assignWall(assignments, wallEdgeKey(cursor, previousGravity), true)) return null;
-    if (!assignWall(assignments, wallEdgeKey(cursor, nextGravity), false)) return null;
+  while (!sameCell(cursor, stop)) {
+    if (!assignWall(assignments, wallEdgeKey(cursor, gravity), false)) return null;
     cursor = {
-      r: cursor.r + DIR_DELTA[nextGravity].r,
-      c: cursor.c + DIR_DELTA[nextGravity].c,
+      r: cursor.r + DIR_DELTA[gravity].r,
+      c: cursor.c + DIR_DELTA[gravity].c,
     };
   }
-  const falls = !sameCell(cursor, stop);
-  if (falls) {
-    if (!assignWall(assignments, wallEdgeKey(cursor, previousGravity), false)) return null;
-    while (!sameCell(cursor, stop)) {
-      if (!assignWall(assignments, wallEdgeKey(cursor, previousGravity), false)) return null;
-      cursor = {
-        r: cursor.r + DIR_DELTA[previousGravity].r,
-        c: cursor.c + DIR_DELTA[previousGravity].c,
-      };
-    }
-    if (!assignWall(assignments, wallEdgeKey(stop, previousGravity), true)) return null;
-  } else {
-    if (!assignWall(assignments, wallEdgeKey(stop, previousGravity), true)) return null;
-    if (!assignWall(assignments, wallEdgeKey(stop, nextGravity), true)) return null;
-  }
+  if (!assignWall(assignments, wallEdgeKey(stop, gravity), true)) return null;
   return assignments;
 }
 
@@ -794,16 +767,14 @@ function isUpstreamOf(cell: Cell, entry: Cell, direction: Direction): boolean {
   return cell.r === entry.r && cell.c >= entry.c;
 }
 
-function imposeSweepDrop(
+function imposeGravityDrop(
   base: Map<string, boolean>,
   from: Cell,
   exit: Exit,
-  previousGravity: Direction,
 ): Map<string, boolean> | null {
   const assignments = new Map(base);
   let cursor = { ...from };
   while (true) {
-    if (!assignWall(assignments, wallEdgeKey(cursor, previousGravity), true)) return null;
     if (sameCell(cursor, exit.cell)) {
       return assignWall(assignments, wallEdgeKey(cursor, exit.direction), false)
         ? assignments
@@ -877,7 +848,7 @@ function planBeadWallOptions(
     const stateKey = `${round}:${key(position)}`;
     const cached = stopsMemo.get(stateKey);
     if (cached) return cached;
-    const stops = sweepStops(position, gravities[round - 1], gravities[round], size);
+    const stops = gravityStops(position, gravities[round], size);
     stopsMemo.set(stateKey, stops);
     return stops;
   };
@@ -898,7 +869,7 @@ function planBeadWallOptions(
   };
   if (!canReach(1, bead.start)) return [];
 
-  let budget = 14000;
+  let budget = Math.max(14000, maxOptions * 7000);
   const results: Map<string, boolean>[] = [];
   const search = (
     round: number,
@@ -907,12 +878,11 @@ function planBeadWallOptions(
   ): void => {
     budget -= 1;
     if (budget <= 0 || results.length >= maxOptions) return;
-    const previousGravity = gravities[round - 1];
     const gravity = gravities[round];
     if (round === targetRound) {
       if (gravity !== bead.exit.direction) return;
       if (!isUpstreamOf(position, trunkEntry, bead.exit.direction)) return;
-      const completed = imposeSweepDrop(assignments, position, bead.exit, previousGravity);
+      const completed = imposeGravityDrop(assignments, position, bead.exit);
       if (completed) results.push(completed);
       return;
     }
@@ -922,10 +892,21 @@ function planBeadWallOptions(
       .sort((a, b) => {
         const da = Math.abs(a.r - bead.exit.cell.r) + Math.abs(a.c - bead.exit.cell.c);
         const db = Math.abs(b.r - bead.exit.cell.r) + Math.abs(b.c - bead.exit.cell.c);
-        return da - db || seededRank(variant, round, a.r, a.c) - seededRank(variant, round, b.r, b.c);
+        const randomDifference = seededRank(variant, round, a.r, a.c)
+          - seededRank(variant, round, b.r, b.c);
+        // A permanently greedy "closest to exit" route was quick for the
+        // first stock question but repeatedly missed shorter solutions for
+        // other bead orders. Alternate between goal-directed, exploratory,
+        // long-detour and short-move route orderings across attempts.
+        if (variant % 4 === 0) return da - db || randomDifference;
+        if (variant % 4 === 1) return randomDifference;
+        if (variant % 4 === 2) return db - da || randomDifference;
+        const moveA = Math.abs(a.r - position.r) + Math.abs(a.c - position.c);
+        const moveB = Math.abs(b.r - position.r) + Math.abs(b.c - position.c);
+        return moveA - moveB || randomDifference;
       });
     for (const stop of stops) {
-      const nextAssignments = imposeSweepStop(assignments, position, stop, previousGravity, gravity);
+      const nextAssignments = imposeGravityStop(assignments, position, stop, gravity);
       if (!nextAssignments) continue;
       search(round + 1, stop, nextAssignments);
       if (budget <= 0 || results.length >= maxOptions) break;
@@ -949,6 +930,8 @@ function constructScheduledPuzzle(
   fixedRotations?: Rotation[],
   requiredWallKeys: string[] = [],
   variantOffset = 0,
+  plannerBreadth = 2,
+  plannerBranchLimit = 24,
 ): Puzzle | null {
   const attemptLimit = Math.max(1, constructionAttempts);
   const debug = Boolean((globalThis as { __MAZE_DEBUG__?: boolean }).__MAZE_DEBUG__);
@@ -1002,16 +985,62 @@ function constructScheduledPuzzle(
 
     // Keep the requested exit order, but backtrack across alternate panel
     // layouts instead of committing to the first route found for each bead.
-    const planningBeads = [...beads].sort((a, b) =>
-      (targetRounds[a.color] ?? 0) - (targetRounds[b.color] ?? 0));
-    let branchBudget = 24;
+    const orderIndex = new Map(order.map((color, index) => [color, index]));
+    const planningBeads = [...beads].sort((a, b) => {
+      const roundDifference = (targetRounds[a.color] ?? 0) - (targetRounds[b.color] ?? 0);
+      if (roundDifference !== 0) return roundDifference;
+      // Beads that leave together are independent in the simulator, but their
+      // wall constraints are not. Always planning them in display order made
+      // red-first schedules much easier than every other color order. Rotate
+      // the planning order across attempts so no requested order is privileged.
+      return seededRank(sequenceVariant, orderIndex.get(a.color) ?? 0, a.start.r, a.start.c)
+        - seededRank(sequenceVariant, orderIndex.get(b.color) ?? 0, b.start.r, b.start.c);
+    });
+    let branchBudget = Math.max(24, plannerBranchLimit);
+    const assignmentsMatchSchedule = (candidate: Map<string, boolean>): boolean => {
+      const candidateWalls = makeBlankWalls(size, true);
+      for (let r = 1; r < size; r += 1) {
+        for (let c = 0; c < size; c += 1) {
+          candidateWalls.h[r][c] = candidate.get(`h-${r}-${c}`) ?? false;
+        }
+      }
+      for (let r = 0; r < size; r += 1) {
+        for (let c = 1; c < size; c += 1) {
+          candidateWalls.v[r][c] = candidate.get(`v-${r}-${c}`) ?? false;
+        }
+      }
+      beads.forEach((bead) => {
+        setBoundaryWall(candidateWalls, bead.exit.cell, bead.exit.direction, false);
+      });
+      const candidateFrames = simulateWalls(candidateWalls, beads, sequence.rotations);
+      const candidateRounds: Partial<Record<Color, number>> = {};
+      let exitsMatch = true;
+      candidateFrames.forEach((frame) => frame.dropEvents.forEach((event) => {
+        const expected = beads.find((bead) => bead.color === event.color)?.exit;
+        if (!expected || !sameCell(event.exit.cell, expected.cell) || event.exit.direction !== expected.direction) {
+          exitsMatch = false;
+          return;
+        }
+        candidateRounds[event.color] = frame.round;
+      }));
+      return exitsMatch
+        && candidateFrames.flatMap((frame) => frame.dropped).join("|") === order.join("|")
+        && beads.every((bead) => candidateRounds[bead.color] === targetRounds[bead.color]);
+    };
     const planAllBeads = (
       beadIndex: number,
       current: Map<string, boolean>,
     ): Map<string, boolean> | null => {
       branchBudget -= 1;
       if (branchBudget <= 0) return null;
-      if (beadIndex >= planningBeads.length) return current;
+      // Do not commit to the first set of individually valid bead paths. Ball
+      // collisions can make that combined layout invalid even though every
+      // single route is valid on its own. Verify at the leaf and keep
+      // backtracking through alternate routes until the full five-ball
+      // schedule actually works.
+      if (beadIndex >= planningBeads.length) {
+        return assignmentsMatchSchedule(current) ? current : null;
+      }
       const bead = planningBeads[beadIndex];
       const targetRound = targetRounds[bead.color];
       if (!targetRound) { reject("missing-target"); return null; }
@@ -1022,8 +1051,13 @@ function constructScheduledPuzzle(
         sequence.gravities,
         size,
         sequenceVariant * 31 + beadIndex * 7 + 1,
-        2,
+        Math.max(2, plannerBreadth),
       );
+      options.sort((a, b) => {
+        const addedWalls = (assignments: Map<string, boolean>) =>
+          [...assignments.values()].filter(Boolean).length;
+        return addedWalls(a) - addedWalls(b);
+      });
       if (options.length === 0) reject(`plan-${bead.color}`);
       for (const option of options) {
         const completed = planAllBeads(beadIndex + 1, option);
@@ -1273,6 +1307,7 @@ export function generatePuzzleForRotations(
   variantOffset = 0,
 ): Puzzle | null {
   if (!allBeadsShareExit(beads) || order.length !== beads.length) return null;
+  const deepShortSearch = completionTurnLimit < rotations.length;
   const gravities = gravitiesForRotations(rotations);
   const opportunities = rotations
     .map((_, index) => index + 1)
@@ -1304,12 +1339,12 @@ export function generatePuzzleForRotations(
         || b.reduce((sum, value) => sum + value, 0)
           - a.reduce((sum, value) => sum + value, 0);
     });
-    const scheduleLimit = Math.min(24, schedules.length);
+    const scheduleLimit = Math.min(deepShortSearch ? 48 : 24, schedules.length);
     // Treat `attempts` as one budget for the whole completion search. Earlier
     // impossible rounds must not each consume the full budget before a later,
     // feasible completion round is reached.
     const attemptsPerSchedule = Math.max(
-      2,
+      deepShortSearch ? 6 : 2,
       Math.min(
         32,
         Math.ceil(attempts / Math.max(1, scheduleLimit * opportunities.length)),
@@ -1333,6 +1368,8 @@ export function generatePuzzleForRotations(
         rotations,
         requiredWallKeys,
         variantOffset + scheduleIndex * 37,
+        deepShortSearch ? 10 : 3,
+        deepShortSearch ? 6144 : 128,
       );
       if (constructed) return constructed;
     }
@@ -2173,6 +2210,71 @@ export function puzzleCompletionRound(puzzle: Puzzle): number {
   if (puzzle.completionRound !== undefined) return puzzle.completionRound;
   const rounds = puzzle.order.map((color) => puzzle.dropRounds[color] ?? 0);
   return rounds.every((round) => round > 0) ? Math.max(...rounds) : 0;
+}
+
+/**
+ * Turns an already solved board (including a player's hand-made answer) into
+ * a fully ranked candidate. This lets the optimizer use known good work as an
+ * upper bound instead of starting every question from scratch.
+ */
+export function puzzleFromSolvedWalls(
+  size: number,
+  beads: BeadConfig[],
+  order: Color[],
+  rotations: Rotation[],
+  walls: WallGrid,
+  presetWalls?: WallGrid,
+): Puzzle | null {
+  const frames = simulateWalls(walls, beads, rotations);
+  const actualOrder = frames.flatMap((frame) => frame.dropped);
+  if (
+    actualOrder.length !== order.length
+    || actualOrder.some((color, index) => color !== order[index])
+  ) return null;
+
+  const dropRounds: Partial<Record<Color, number>> = {};
+  let exitsMatch = true;
+  frames.forEach((frame) => frame.dropEvents.forEach((event) => {
+    const expected = beads.find((bead) => bead.color === event.color)?.exit;
+    if (!expected || !sameCell(event.exit.cell, expected.cell) || event.exit.direction !== expected.direction) {
+      exitsMatch = false;
+      return;
+    }
+    dropRounds[event.color] = frame.round;
+  }));
+  if (!exitsMatch || order.some((color) => !dropRounds[color])) return null;
+
+  const completionRound = Math.max(...order.map((color) => dropRounds[color] ?? 0));
+  // Older saved boards used a three-cell shared channel, while newer compact
+  // boards may explicitly use a shorter one. Accept only a length that passes
+  // the same authoritative validator used for generated answers.
+  for (const commonChannelLength of [3, 2, 1]) {
+    const puzzle: Puzzle = {
+      rulesVersion: 3,
+      size,
+      beads: beads.map((bead) => ({
+        ...bead,
+        start: { ...bead.start },
+        exit: { cell: { ...bead.exit.cell }, direction: bead.exit.direction },
+      })),
+      order: [...order],
+      turnCount: rotations.length,
+      completionRound,
+      minLength: 3,
+      maxLength: size * size,
+      rotations: [...rotations],
+      dropRounds,
+      paths: pathsFromFrames(beads, frames),
+      referenceWalls: cloneWalls(walls),
+      presetWalls: presetWalls ? cloneWalls(presetWalls) : undefined,
+      solutionLowerBound: 1,
+      countedSamples: 0,
+      commonChannelLength,
+      panelCount: countInternalPanels(walls),
+    };
+    if (validateAnswer(puzzle, walls).ok) return puzzle;
+  }
+  return null;
 }
 
 /**
