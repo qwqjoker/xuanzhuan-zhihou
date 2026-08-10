@@ -1,6 +1,7 @@
 "use client";
 
 import { CSSProperties, ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import publishedQuestionLibrary from "./published-question-library.json";
 import {
   ALL_COLORS,
   BeadConfig,
@@ -68,6 +69,7 @@ type BoardStats = {
 };
 
 const QUESTION_LIBRARY_KEY = "旋转之后_v5_题目库";
+const QUESTION_LIBRARY_BACKUP_KEY = "旋转之后_v5_题目库_自动备份";
 const BOARD_LIBRARY_KEY = "旋转之后_v5_盘面库";
 const SHARE_HASH_PREFIX = "#share=";
 const LIBRARY_SHARE_HASH_PREFIX = "#library=";
@@ -155,6 +157,19 @@ function normalizeSavedLibraries(rawQuestions: unknown, rawBoards: unknown): Sav
     if (!target.answers.some((answer) => answer.id === board.id)) target.answers.push(board);
   });
   return migrated;
+}
+
+const PUBLISHED_QUESTIONS = publishedQuestionLibrary as unknown as SavedQuestion[];
+
+function mergeQuestionLibraries(...libraries: SavedQuestion[][]): SavedQuestion[] {
+  const merged = new Map<string, SavedQuestion>();
+  libraries.flat().forEach((question) => {
+    const existing = merged.get(question.id);
+    if (!existing || Date.parse(question.savedAt) >= Date.parse(existing.savedAt)) {
+      merged.set(question.id, question);
+    }
+  });
+  return [...merged.values()].sort((a, b) => Date.parse(b.savedAt) - Date.parse(a.savedAt));
 }
 
 function bytesToBase64Url(bytes: Uint8Array) {
@@ -652,18 +667,27 @@ export default function Home() {
 
   useEffect(() => {
     void (async () => {
+      const published = normalizeSavedLibraries(PUBLISHED_QUESTIONS, []);
+      let normalized = published;
       try {
         const questions = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_KEY) ?? "[]");
         const boards = JSON.parse(window.localStorage.getItem(BOARD_LIBRARY_KEY) ?? "[]");
-        let normalized = normalizeSavedLibraries(questions, boards);
+        normalized = mergeQuestionLibraries(published, normalizeSavedLibraries(questions, boards));
+      } catch {
+        try {
+          const backup = JSON.parse(window.localStorage.getItem(QUESTION_LIBRARY_BACKUP_KEY) ?? "[]");
+          normalized = mergeQuestionLibraries(published, normalizeSavedLibraries(backup, []));
+          setNotice("本机题库读取异常，已从自动备份和公开题库恢复。");
+        } catch {
+          normalized = published;
+          setNotice("本机题库读取异常，已保留项目内置公开题库。");
+        }
+      }
+      try {
         if (window.location.hash.startsWith(LIBRARY_SHARE_HASH_PREFIX)) {
           const token = window.location.hash.slice(LIBRARY_SHARE_HASH_PREFIX.length);
           const sharedLibrary = await decodeSharedLibrary(token);
-          const sharedIds = new Set(sharedLibrary.map((item) => item.id));
-          normalized = [
-            ...sharedLibrary,
-            ...normalized.filter((item) => !sharedIds.has(item.id)),
-          ];
+          normalized = mergeQuestionLibraries(normalized, sharedLibrary);
           const first = sharedLibrary[0];
           setSelectedQuestionId(first.id);
           setQuestionName(first.name);
@@ -672,19 +696,16 @@ export default function Home() {
         } else if (window.location.hash.startsWith(SHARE_HASH_PREFIX)) {
           const token = window.location.hash.slice(SHARE_HASH_PREFIX.length);
           const shared = await decodeSharedQuestion(token);
-          const existing = normalized.find((item) => item.id === shared.id);
-          normalized = existing
-            ? normalized.map((item) => item.id === shared.id ? shared : item)
-            : [shared, ...normalized];
+          normalized = mergeQuestionLibraries(normalized, [shared]);
           setSelectedQuestionId(shared.id);
           setQuestionName(shared.name);
           applySavedQuestion(shared);
           setNotice(`已从分享链接载入“${shared.name}”及其 ${shared.answers.length} 个解。`);
         }
-        setSavedQuestions(normalized);
       } catch {
-        setNotice("题库或分享链接读取失败；仍可继续使用程序并重新保存。");
+        setNotice("分享链接读取失败；已保留本机题库和项目内置公开题库。");
       } finally {
+        setSavedQuestions(normalized);
         setStorageReady(true);
       }
     })();
@@ -693,6 +714,10 @@ export default function Home() {
   useEffect(() => {
     if (!storageReady) return;
     try {
+      const current = window.localStorage.getItem(QUESTION_LIBRARY_KEY);
+      if (current && current !== "[]") {
+        window.localStorage.setItem(QUESTION_LIBRARY_BACKUP_KEY, current);
+      }
       window.localStorage.setItem(QUESTION_LIBRARY_KEY, JSON.stringify(savedQuestions));
     } catch {
       window.setTimeout(() => {
