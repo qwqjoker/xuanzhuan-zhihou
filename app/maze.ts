@@ -807,8 +807,8 @@ function imposeSharedTrunk(
 ): Map<string, boolean> | null {
   const assignments = new Map(base);
   const cells = sharedTrunkCells(exit, size, length);
-  // The first cell is the merge mouth: side branches must be allowed to enter
-  // it. Only the downstream cells are the fully bounded common channel.
+  // This is a constructive search hint, not an answer-validity rule. It gives
+  // the legacy generator a reliable seed while the validator accepts any route.
   for (const cell of cells.slice(1)) {
     for (const direction of perpendicularDirections(exit.direction)) {
       if (!assignWall(assignments, wallEdgeKey(cell, direction), true)) return null;
@@ -1040,7 +1040,7 @@ function constructScheduledPuzzle(
       // Do not commit to the first set of individually valid bead paths. Ball
       // collisions can make that combined layout invalid even though every
       // single route is valid on its own. Verify at the leaf and keep
-      // backtracking through alternate routes until the full five-ball
+      // backtracking through alternate routes until the full multi-ball
       // schedule actually works.
       if (beadIndex >= planningBeads.length) {
         return assignmentsMatchSchedule(current) ? current : null;
@@ -1629,7 +1629,6 @@ function evaluateSettledCandidate(
   const exact = dropSequence.length === order.length
     && dropSequence.every((color, index) => color === order[index])
     && lastDropRound <= completionTurnLimit;
-  const allUseTrunk = beads.every((bead) => trunk.every((cell) => visited.get(bead.color)!.has(key(cell))));
   const focusCells: Cell[] = [];
   if (nextColor) {
     frames.forEach((frame) => (frame.trajectories[nextColor] ?? []).forEach((cell) => focusCells.push(cell)));
@@ -1657,7 +1656,7 @@ function evaluateSettledCandidate(
       - distancePenalty * 1_000
       - lastCorrectRound * 20_000
       - idle * 50,
-    solved: exact && allUseTrunk,
+    solved: exact,
     prefixLength: prefix,
     frames,
     dropSequence,
@@ -2102,13 +2101,26 @@ export function validateAnswer(
       });
     if (missingPreset) details.push("题目预置挡板不可移除，作答盘面必须完整保留。");
   }
+  const beadColors = puzzle.beads.map((bead) => bead.color);
+  const uniqueColors = new Set(beadColors);
   if (
-    puzzle.beads.length !== ALL_COLORS.length
-    || !ALL_COLORS.every((color) => puzzle.beads.some((bead) => bead.color === color))
+    puzzle.beads.length < 1
+    || puzzle.beads.length > ALL_COLORS.length
+    || uniqueColors.size !== puzzle.beads.length
+    || beadColors.some((color) => !ALL_COLORS.includes(color))
   ) {
-    details.push("正式题面必须且只能使用红、黄、蓝、绿、紫五颗珠子。");
+    details.push("题面可使用 1—5 颗颜色不重复的珠子。");
   }
-  const network = networkStats(walls, puzzle.beads[0].start);
+  if (
+    puzzle.order.length !== puzzle.beads.length
+    || puzzle.order.some((color) => !uniqueColors.has(color))
+    || new Set(puzzle.order).size !== puzzle.order.length
+  ) {
+    details.push("掉落顺序必须恰好包含题面中的全部珠子，且颜色不得重复。");
+  }
+  if (puzzle.beads.length === 0) {
+    return { ok: false, title: "还差一点", details: Array.from(new Set(details)) };
+  }
   if (!allBeadsShareExit(puzzle.beads)) {
     details.push("所有珠子必须使用同一个共用出口。");
   }
@@ -2116,16 +2128,7 @@ export function validateAnswer(
     if (!hasStartPlatform(walls, bead)) {
       details.push(`${COLOR_LABEL[bead.color]}珠起点正下方必须有一块直接接触的挡板。`);
     }
-    if (!network.keys.has(key(bead.start))) {
-      details.push(`${COLOR_LABEL[bead.color]}珠起点没有接入共享迷宫。`);
-    }
-    if (!network.keys.has(key(bead.exit.cell))) {
-      details.push(`${COLOR_LABEL[bead.color]}珠出口没有接入共享迷宫。`);
-    }
   });
-  if (network.junctions === 0) {
-    details.push("禁止使用单通道：共享迷宫至少需要一个三向或四向分叉点。");
-  }
   const expectedExits = Array.from(new Set(puzzle.beads.map((bead) => exitKey(bead.exit, puzzle.size)))).sort();
   const actualExits = openBoundaryKeys(walls).sort();
   if (expectedExits.join("|") !== actualExits.join("|")) {
@@ -2133,34 +2136,6 @@ export function validateAnswer(
   }
 
   const frames = simulateWalls(walls, puzzle.beads, puzzle.rotations);
-  const commonExit = puzzle.beads[0].exit;
-  const trunk = sharedTrunkCells(commonExit, puzzle.size, puzzle.commonChannelLength ?? 3);
-  // The upstream entry is intentionally allowed to accept side branches; the
-  // remaining cells form the visibly bounded shared channel to the exit.
-  trunk.slice(1).forEach((cell) => {
-    perpendicularDirections(commonExit.direction).forEach((direction) => {
-      if (!hasWall(walls, cell, direction)) {
-        details.push("共用主通道两侧必须由插板连续约束，不能敞开成一大片区域。");
-      }
-    });
-  });
-  for (let index = 0; index < trunk.length - 1; index += 1) {
-    if (hasWall(walls, trunk[index], commonExit.direction)) {
-      details.push("共用主通道内部被插板截断。");
-    }
-  }
-  const visitedByColor = new Map<Color, Set<string>>();
-  puzzle.beads.forEach((bead) => visitedByColor.set(bead.color, new Set([key(bead.start)])));
-  frames.slice(1).forEach((frame) => {
-    puzzle.beads.forEach((bead) => {
-      (frame.trajectories[bead.color] ?? []).forEach((cell) => visitedByColor.get(bead.color)!.add(key(cell)));
-    });
-  });
-  puzzle.beads.forEach((bead) => {
-    if (!trunk.every((cell) => visitedByColor.get(bead.color)!.has(key(cell)))) {
-      details.push(`${COLOR_LABEL[bead.color]}珠没有完整经过出口前的共用主通道。`);
-    }
-  });
   const actualRounds: Partial<Record<Color, number>> = {};
   const actualOrder = frames.flatMap((frame) => frame.dropped);
   frames.forEach((frame) => {
@@ -2193,7 +2168,7 @@ export function validateAnswer(
   return {
     ok: true,
     title: "验证通过",
-    details: [`全部珠子均经过出口前 ${trunk.length} 格共用主通道；每轮定位后均沿当前重力滚稳，并按规定顺序从共用出口离场。`],
+    details: ["全部珠子每轮定位后均沿当前重力滚稳，并按规定顺序从同一个共用出口离场。"],
     frames,
   };
 }

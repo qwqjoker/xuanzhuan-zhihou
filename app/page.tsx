@@ -21,7 +21,6 @@ import {
   makeBlankWalls,
   puzzleCompletionRound,
   resizeBeads,
-  sharedTrunkCells,
   simulateWalls,
   syncBeadSupportWalls,
   validateAnswer,
@@ -208,7 +207,10 @@ function normalizeSharedQuestion(value: unknown, tokenSuffix: string): SavedQues
     || item.size < 5
     || item.size > 16
     || !Array.isArray(item.beads)
-    || item.beads.length !== ALL_COLORS.length
+    || item.beads.length < 1
+    || item.beads.length > ALL_COLORS.length
+    || new Set(item.beads.map((bead) => bead.color)).size !== item.beads.length
+    || item.beads.some((bead) => !ALL_COLORS.includes(bead.color))
     || !Array.isArray(item.rotations)
     || item.rotations.length < 1
     || item.rotations.length > 30
@@ -465,21 +467,6 @@ function Board({
   const boardRef = useRef<HTMLDivElement>(null);
   const [draggingBall, setDraggingBall] = useState<Color | null>(null);
   const exits = useMemo(() => configuredExitMap(beads, size), [beads, size]);
-  const trunkWalls = useMemo(() => {
-    const result = new Set<string>();
-    const exit = beads[0]?.exit;
-    if (!exit) return result;
-    sharedTrunkCells(exit, size, 3).forEach((cell) => {
-      if (exit.direction === "up" || exit.direction === "down") {
-        result.add(edgeId("v", cell.r, cell.c));
-        result.add(edgeId("v", cell.r, cell.c + 1));
-      } else {
-        result.add(edgeId("h", cell.r, cell.c));
-        result.add(edgeId("h", cell.r + 1, cell.c));
-      }
-    });
-    return result;
-  }, [beads, size]);
 
   return (
     <div className="board-stage">
@@ -534,11 +521,11 @@ function Board({
                 <button
                   type="button"
                   key={`h-${r}-${c}`}
-                  className={`edge horizontal ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("h", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge horizontal ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? `tool-${tool}` : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, width: `${step}%` }}
                   onClick={() => onEdge("h", r, c)}
                   disabled={!enabled}
-                  aria-label={`${boundary ? "边界" : "横向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : trunkWalls.has(edgeId("h", r, c)) ? "共用主通道侧墙" : active ? "作答新增挡板" : "无墙"}`}
+                  aria-label={`${boundary ? "边界" : "横向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : active ? "作答新增挡板" : "无墙"}`}
                 />
               );
             }),
@@ -555,11 +542,11 @@ function Board({
                 <button
                   type="button"
                   key={`v-${r}-${c}`}
-                  className={`edge vertical ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${trunkWalls.has(edgeId("v", r, c)) ? "common-channel-wall" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge vertical ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? `tool-${tool}` : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, height: `${step}%` }}
                   onClick={() => onEdge("v", r, c)}
                   disabled={!enabled}
-                  aria-label={`${boundary ? "边界" : "纵向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : trunkWalls.has(edgeId("v", r, c)) ? "共用主通道侧墙" : active ? "作答新增挡板" : "无墙"}`}
+                  aria-label={`${boundary ? "边界" : "纵向边线"}，${configuredExit ? "所有珠子的共用出口" : preset ? "题目预置挡板" : active ? "作答新增挡板" : "无墙"}`}
                 />
               );
             }),
@@ -993,7 +980,7 @@ export default function Home() {
   }
 
   function checkSettings(): string | null {
-    if (beads.length !== 5) return "正式题面必须使用红、黄、蓝、绿、紫五颗珠子。";
+    if (beads.length < 1 || beads.length > ALL_COLORS.length) return "题面可使用 1—5 颗颜色不重复的珠子。";
     if (new Set(beads.map((bead) => `${bead.start.r},${bead.start.c}`)).size !== beads.length) return "珠子起点不能重叠。";
     const commonExit = beads[0].exit;
     if (!beads.every((bead) => sameLocation(bead.exit.cell, commonExit.cell) && bead.exit.direction === commonExit.direction)) return "所有珠子必须使用同一个共用出口。";
@@ -1448,8 +1435,10 @@ export default function Home() {
           value.rulesVersion !== 3
           || !value.size
           || !Array.isArray(value.beads)
-          || value.beads.length !== ALL_COLORS.length
-          || !ALL_COLORS.every((color) => value.beads.some((bead) => bead.color === color))
+          || value.beads.length < 1
+          || value.beads.length > ALL_COLORS.length
+          || new Set(value.beads.map((bead) => bead.color)).size !== value.beads.length
+          || value.beads.some((bead) => !ALL_COLORS.includes(bead.color))
           || !value.referenceWalls
           || value.rotations.length > 30
         ) throw new Error();
@@ -1480,7 +1469,7 @@ export default function Home() {
         setValidation(null);
         setNotice("题目已读取；旧的多出口配置会自动统一到第一个共用出口。 ");
       } catch {
-        setNotice("无法读取这个题目文件；V5.0 只接受完整五珠、共用出口的规则题面。");
+        setNotice("无法读取这个题目文件；请确认题面使用 1—5 颗颜色不重复的珠子，并设置同一个共用出口。");
       }
     };
     reader.readAsText(file);
@@ -1607,7 +1596,7 @@ export default function Home() {
           </section>
 
           <section className="control-section">
-            <div className="field-row"><span className="field-label">五珠掉落顺序</span><small>拖动整行或使用箭头</small></div>
+            <div className="field-row"><span className="field-label">珠子掉落顺序</span><small>当前 {beads.length} 珠 · 拖动整行或使用箭头</small></div>
             <div className="bead-list">
               {beads.map((bead, index) => (
                 <div
@@ -1692,7 +1681,7 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              <div className="card-topline"><span>{puzzle.size}×{puzzle.size} · {puzzle.commonChannelLength ?? 3} 格共用主通道</span><b>{puzzle.turnCount} 次</b></div>
+              <div className="card-topline"><span>{puzzle.size}×{puzzle.size} · {puzzle.beads.length} 珠 · 共用出口</span><b>{puzzle.turnCount} 次</b></div>
               <div className="drop-schedule">
                 {puzzle.order.map((color) => <div key={color}><span className={`mini-ball ${color}`} /><b>{COLOR_LABEL[color]}珠</b><em>第 {puzzle.dropRounds[color]} 次</em></div>)}
               </div>
@@ -1792,7 +1781,7 @@ export default function Home() {
             <div className="manual-result">
               <span>当前实际掉落</span>
               <strong>{manualDropSequence.length > 0 ? manualDropSequence.map((color) => COLOR_LABEL[color]).join(" → ") : "尚无珠子离场"}</strong>
-              <small>{manualDropSequence.join("|") === beads.map((bead) => bead.color).join("|") ? "顺序正确，五珠全部从共用出口离场。" : "可继续改挡板、起点或每轮旋转方向。"}</small>
+              <small>{manualDropSequence.join("|") === beads.map((bead) => bead.color).join("|") ? `顺序正确，${beads.length} 颗珠子全部从共用出口离场。` : "可继续改挡板、起点或每轮旋转方向。"}</small>
             </div>
           )}
         </aside>
@@ -1800,7 +1789,7 @@ export default function Home() {
 
       {validation && <div className={`validation-toast ${validation.ok ? "success" : "warning"}`}><button className="toast-close" onClick={() => setValidation(null)}>×</button><p className="section-kicker">规则验证</p><h3>{validation.title}</h3><ul>{validation.details.map((detail) => <li key={detail}>{detail}</li>)}</ul>{validation.ok && <button onClick={() => setPlaying(true)}>播放我的答案</button>}</div>}
 
-      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>固定五珠。</b>红、黄、蓝、绿、紫五颗珠子必须按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>题目可预置挡板。</b>出题时可在初始盘面预先放置插板；陶色挡板（包括每颗珠子的起点托板）属于题目条件，选手不可移除，系统解也必须保留。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>必须经过共用主通道。</b>各珠支路可从汇流口的侧面或后方进入；汇流口之后形成连续主通道，并由插板约束到同一出口。</li><li><b>禁止单通道。</b>全部起点与出口必须接入同一共享迷宫，且至少包含一个三向或四向分叉点，不能用五条彼此隔离的通道作答。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>正解、轮数、插板三级排序。</b>程序先验证完整正解，再从理论最早离场轮数开始逐轮搜索；首次找到完整解后，只在这个最短轮数内比较插板数量并生成路线不同的独立解。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
+      {showRules && <div className="modal-backdrop" onMouseDown={() => setShowRules(false)}><section className="rules-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setShowRules(false)}>×</button><p className="section-kicker">RULEBOOK · V5.0</p><h2>定位、滚稳与插板规则</h2><ol><li><b>珠子数量可变。</b>题面可使用 1—5 颗颜色不重复的珠子，并按选手设定的列表顺序离场；程序自动确定各珠的实际掉落轮次。</li><li><b>题目可预置挡板。</b>出题时可在初始盘面预先放置插板；陶色挡板（包括每颗珠子的起点托板）属于题目条件，选手不可移除，系统解也必须保留。</li><li><b>只有线形插板。</b>盘底所有格子都可供珠子移动，不允许用整格色块表示障碍；挡板只放在网格线上。</li><li><b>单一共用出口。</b>所有珠子只从同一条外边线离场；重新放置出口会同步更新全部珠子。</li><li><b>通道形式不限。</b>允许单通道、分支通道、合流通道或彼此独立的路线；只要珠子最终按规定顺序从共用出口离场即可。</li><li><b>起点必须有托板。</b>每颗珠子起点正下方都必须有一块直接接触的挡板，保证第一轮开始前不会自行下落。</li><li><b>先定位，再结算。</b>每轮盘面先完成一次 90° 顺时针或逆时针旋转，再更新规则重力方向；珠子只沿该方向逐格移动到稳定。</li><li><b>出口必须朝向重力。</b>珠子只有在当前规则重力正对共用出口并到达出口格时才能离场；同轮有多珠离场时也必须严格保持设定顺序。</li><li><b>不考虑现实物理。</b>不计算转动惯性、离心力、摩擦、弹跳、滑移、材料误差或电机过程；选手只需满足本程序的离散规则。</li><li><b>珠子互相阻挡。</b>当前方向上更靠前的珠子先移动，后方珠子受占位阻挡。</li><li><b>正解、轮数、插板三级排序。</b>程序先验证完整正解，再从理论最早离场轮数开始逐轮搜索；首次找到完整解后，只在这个最短轮数内比较插板数量并生成路线不同的独立解。</li></ol><button className="primary-button" onClick={() => setShowRules(false)}>明白了</button></section></div>}
     </main>
   );
 }
