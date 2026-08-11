@@ -8,9 +8,9 @@ import {
   WallGrid,
   countInternalPanels,
   generateAutomaticPuzzle,
+  generatePuzzleForRotations,
   internalPanelKeys,
   isIndependentPuzzleSolution,
-  isLocallyMinimalPuzzleSolution,
   minimizePuzzleWalls,
   puzzleFromSolvedWalls,
   puzzleCompletionRound,
@@ -74,7 +74,6 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
     if (puzzle.rotations.length !== prescribedRotations.length) return false;
     if (puzzle.rotations.some((rotation, index) => rotation !== prescribedRotations[index])) return false;
     const minimized = optimize(puzzle);
-    if (!isLocallyMinimalPuzzleSolution(minimized)) return false;
     const signature = internalPanelKeys(minimized.referenceWalls).sort().join("|");
     if (candidateSignatures.has(signature)) return false;
     candidateSignatures.add(signature);
@@ -144,6 +143,25 @@ scope.onmessage = (event: MessageEvent<GenerateRequest>) => {
       bestPuzzle,
       `已采用当前题目中已验证的第 ${puzzleCompletionRound(bestPuzzle)} 轮方案作为基准，继续搜索更少轮次。`,
     );
+  }
+  if (!bestPuzzle) {
+    const quickConstructed = generatePuzzleForRotations(
+      request.size,
+      request.beads,
+      request.order,
+      prescribedRotations,
+      request.beads.length >= 4 ? 180 : 120,
+      request.turnCount,
+      requiredWallKeys,
+      811,
+    );
+    if (quickConstructed) {
+      bestPuzzle = quickConstructed;
+      preview(
+        bestPuzzle,
+        `已快速找到完整正解：当前第 ${puzzleCompletionRound(bestPuzzle)} 轮完成；结果已经显示，后台继续压缩轮次和挡板。`,
+      );
+    }
   }
   for (let index = 0; index < variantOffsets.length && !bestPuzzle; index += 1) {
     bestPuzzle = generate(

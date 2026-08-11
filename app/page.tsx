@@ -20,6 +20,7 @@ import {
   exitToEdge,
   makeAnswerWalls,
   makeBlankWalls,
+  puzzleFromSolvedWalls,
   puzzleCompletionRound,
   resizeBeads,
   simulateWalls,
@@ -27,9 +28,8 @@ import {
   validateAnswer,
 } from "./maze";
 
-type Tool = "wall" | "erase";
 type BoardSource = "answer" | "reference";
-type SetupMode = "start" | "exit" | "walls";
+type WorkspaceMode = "design" | "answer";
 type EdgeKind = "h" | "v";
 type SavedBoardKind = "answer" | "generated";
 
@@ -453,10 +453,7 @@ function Board({
   editExits,
   editWalls,
   lockPresetWalls,
-  tool,
-  activeColor,
   onEdge,
-  onCell,
   onBallPick,
   onBallMove,
 }: {
@@ -471,10 +468,7 @@ function Board({
   editExits: boolean;
   editWalls: boolean;
   lockPresetWalls: boolean;
-  tool: Tool;
-  activeColor: Color;
   onEdge: (kind: EdgeKind, row: number, col: number) => void;
-  onCell: (row: number, col: number) => void;
   onBallPick: (color: Color) => void;
   onBallMove: (color: Color, row: number, col: number) => void;
 }) {
@@ -517,9 +511,8 @@ function Board({
                 key={`cell-${row}-${col}`}
                 className="cell-target"
                 style={{ left: `${col * step}%`, top: `${row * step}%`, width: `${step}%`, height: `${step}%` }}
-                onClick={() => onCell(row, col)}
-                disabled={!editStarts}
-                aria-label={`${cellLabel(row, col)}格${editStarts ? `，设置${COLOR_LABEL[activeColor]}珠起点` : ""}`}
+                disabled
+                aria-label={`${cellLabel(row, col)}格`}
               ><span>{cellLabel(row, col)}</span></button>
             );
           })}
@@ -529,14 +522,14 @@ function Board({
               const boundary = r === 0 || r === size;
               const configuredExit = exits.get(edgeId("h", r, c));
               const preset = active && presetWalls.h[r][c];
-              const enabled = editWalls
-                ? !boundary && !(lockPresetWalls && preset)
-                : editExits && boundary;
+              const enabled = (
+                !boundary && editWalls && !(lockPresetWalls && preset)
+              ) || (boundary && editExits);
               return (
                 <button
                   type="button"
                   key={`h-${r}-${c}`}
-                  className={`edge horizontal ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge horizontal ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? "edge-editable" : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, width: `${step}%` }}
                   onClick={() => onEdge("h", r, c)}
                   disabled={!enabled}
@@ -550,14 +543,14 @@ function Board({
               const boundary = c === 0 || c === size;
               const configuredExit = exits.get(edgeId("v", r, c));
               const preset = active && presetWalls.v[r][c];
-              const enabled = editWalls
-                ? !boundary && !(lockPresetWalls && preset)
-                : editExits && boundary;
+              const enabled = (
+                !boundary && editWalls && !(lockPresetWalls && preset)
+              ) || (boundary && editExits);
               return (
                 <button
                   type="button"
                   key={`v-${r}-${c}`}
-                  className={`edge vertical ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? `tool-${tool}` : ""}`}
+                  className={`edge vertical ${active ? "active" : "open"} ${preset && !boundary ? "preset-wall" : ""} ${boundary ? "boundary" : ""} ${configuredExit ? "configured-exit exit-shared" : ""} ${enabled ? "edge-editable" : ""}`}
                   style={{ left: `${c * step}%`, top: `${r * step}%`, height: `${step}%` }}
                   onClick={() => onEdge("v", r, c)}
                   disabled={!enabled}
@@ -602,7 +595,7 @@ export default function Home() {
   const [size, setSize] = useState(10);
   const [beads, setBeads] = useState<BeadConfig[]>(() => defaultBeads(10));
   const [activeColor, setActiveColor] = useState<Color>("red");
-  const [setupMode, setSetupMode] = useState<SetupMode>("start");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("design");
   const [turnCount, setTurnCount] = useState(10);
   const [plannedRotations, setPlannedRotations] = useState<Rotation[]>(() => defaultRotations(10));
   const [, setDropTargets] = useState<Partial<Record<Color, number>>>(() => evenlySpacedDropRounds(defaultBeads(10), 10));
@@ -612,7 +605,6 @@ export default function Home() {
   const [walls, setWalls] = useState<WallGrid>(() => makeAnswerWalls(10, defaultBeads(10)));
   const [presetWalls, setPresetWalls] = useState<WallGrid>(() => makeAnswerWalls(10, defaultBeads(10)));
   const [undoStack, setUndoStack] = useState<WallGrid[]>([]);
-  const [tool, setTool] = useState<Tool>("wall");
   const [source, setSource] = useState<BoardSource>("answer");
   const [round, setRound] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -625,6 +617,7 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const lastAnimatedRound = useRef(0);
   const generationWorker = useRef<Worker | null>(null);
+  const searchResultAnnounced = useRef(false);
   const beadsRef = useRef(beads);
   const [savedQuestions, setSavedQuestions] = useState<SavedQuestion[]>([]);
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
@@ -632,8 +625,9 @@ export default function Home() {
   const [questionName, setQuestionName] = useState("");
   const [answerName, setAnswerName] = useState("");
   const [storageReady, setStorageReady] = useState(false);
+  const [showSearchResult, setShowSearchResult] = useState(false);
 
-  const activeBead = beads.find((bead) => bead.color === activeColor) ?? beads[0];
+  const isAnswerMode = workspaceMode === "answer";
   const displayedWalls = source === "reference" && puzzle ? puzzle.referenceWalls : walls;
   const displayedPresetWalls = puzzle?.presetWalls ?? presetWalls;
   const playbackBeads = puzzle?.beads ?? beads;
@@ -814,7 +808,7 @@ export default function Home() {
   }, [playbackTurnCount, round]);
 
   function updateSize(nextSize: number) {
-    if (puzzle) return;
+    if (isAnswerMode) return;
     const safe = Math.max(5, Math.min(16, nextSize));
     const nextBeads = resizeBeads(beads, size, safe);
     const nextPresetWalls = makeAnswerWalls(safe, nextBeads);
@@ -831,7 +825,7 @@ export default function Home() {
   }
 
   function updateTurnCount(nextCount: number) {
-    if (puzzle) return;
+    if (isAnswerMode) return;
     const safe = Math.max(1, Math.min(30, nextCount));
     setTurnCount(safe);
     setPlannedRotations((current) => Array.from(
@@ -844,7 +838,7 @@ export default function Home() {
   }
 
   function updatePlannedRotation(index: number, rotation: Rotation) {
-    if (puzzle) return;
+    if (isAnswerMode) return;
     setPlannedRotations((current) => current.map((item, itemIndex) => itemIndex === index ? rotation : item));
     setRound(0);
     setPlaying(false);
@@ -852,7 +846,7 @@ export default function Home() {
   }
 
   function chooseStartForColor(color: Color, row: number, col: number) {
-    if (puzzle || setupMode !== "start") return;
+    if (isAnswerMode) return;
     const currentBeads = beadsRef.current;
     const occupied = currentBeads.find((bead) => bead.color !== color && bead.start.r === row && bead.start.c === col);
     if (occupied) {
@@ -873,12 +867,8 @@ export default function Home() {
     setNotice(`${COLOR_LABEL[color]}珠起点设为 ${cellLabel(row, col)}。`);
   }
 
-  function chooseStart(row: number, col: number) {
-    chooseStartForColor(activeColor, row, col);
-  }
-
   function chooseExit(kind: EdgeKind, row: number, col: number) {
-    if (puzzle || setupMode !== "exit") return;
+    if (isAnswerMode) return;
     const exit = edgeToExit(kind, row, col, size);
     if (!exit) return;
     const next = beads.map((bead) => ({
@@ -893,7 +883,7 @@ export default function Home() {
   }
 
   function addBead(color: Color) {
-    if (puzzle || beads.some((bead) => bead.color === color)) return;
+    if (isAnswerMode || beads.some((bead) => bead.color === color)) return;
     const usedStarts = new Set(beads.map((bead) => `${bead.start.r},${bead.start.c}`));
     let start = { r: Math.floor(size / 2), c: Math.floor(size / 2) };
     for (let r = 0; r < size; r += 1) {
@@ -928,7 +918,7 @@ export default function Home() {
   }
 
   function removeBead(color: Color) {
-    if (puzzle || beads.length <= 1) return;
+    if (isAnswerMode || beads.length <= 1) return;
     const next = beads.filter((bead) => bead.color !== color);
     setWalls((current) => syncBeadSupportWalls(current, beads, next));
     setPresetWalls((current) => syncBeadSupportWalls(current, beads, next));
@@ -960,7 +950,7 @@ export default function Home() {
   }
 
   function moveBeadBefore(color: Color, targetColor: Color) {
-    if (puzzle || color === targetColor) return;
+    if (isAnswerMode || color === targetColor) return;
     const next = beads.filter((bead) => bead.color !== color);
     const moving = beads.find((bead) => bead.color === color);
     const target = next.findIndex((bead) => bead.color === targetColor);
@@ -972,14 +962,12 @@ export default function Home() {
   }
 
   function editEdge(kind: EdgeKind, row: number, col: number) {
-    if (!puzzle) {
-      if (setupMode === "exit") {
+    const boundary = kind === "h" ? row === 0 || row === size : col === 0 || col === size;
+    if (!isAnswerMode) {
+      if (boundary) {
         chooseExit(kind, row, col);
         return;
       }
-      if (setupMode !== "walls") return;
-      const boundary = kind === "h" ? row === 0 || row === size : col === 0 || col === size;
-      if (boundary) return;
       setUndoStack((stack) => [...stack.slice(-39), cloneWalls(walls)]);
       const next = cloneWalls(walls);
       if (kind === "h") next.h[row][col] = !next.h[row][col];
@@ -992,12 +980,11 @@ export default function Home() {
       return;
     }
     if (source !== "answer") return;
-    const boundary = kind === "h" ? row === 0 || row === size : col === 0 || col === size;
     if (boundary) return;
     setUndoStack((stack) => [...stack.slice(-39), cloneWalls(walls)]);
     const next = cloneWalls(walls);
-    if (kind === "h") next.h[row][col] = tool === "wall";
-    else next.v[row][col] = tool === "wall";
+    if (kind === "h") next.h[row][col] = !next.h[row][col];
+    else next.v[row][col] = !next.v[row][col];
     setWalls(next);
     setRound(0);
     setPlaying(false);
@@ -1032,6 +1019,8 @@ export default function Home() {
     const worker = new Worker(new URL("./maze-worker.ts", import.meta.url), { type: "module" });
     generationWorker.current = worker;
     setBusy(true);
+    setShowSearchResult(false);
+    searchResultAnnounced.current = false;
     setNotice("正在验证正解；按轮数从少到多搜索，确定最少轮后再比较插板数。");
     let receivedPartial = false;
     const showGeneratedResults = (results: Puzzle[]) => {
@@ -1045,11 +1034,14 @@ export default function Home() {
       setPuzzle(result);
       const resultPresetWalls = result.presetWalls ?? presetWalls;
       setPresetWalls(cloneWalls(resultPresetWalls));
-      setWalls(cloneWalls(resultPresetWalls));
-      setUndoStack([]);
       setSource("reference");
+      setWorkspaceMode("answer");
       setRound(0);
       setValidation(null);
+      if (!searchResultAnnounced.current) {
+        searchResultAnnounced.current = true;
+        setShowSearchResult(true);
+      }
     };
     worker.onmessage = (event: MessageEvent<
       | { type: "progress"; message: string }
@@ -1125,9 +1117,8 @@ export default function Home() {
     lastAnimatedRound.current = 0;
     const nextPresetWalls = next.presetWalls ?? makeAnswerWalls(next.size, next.beads);
     setPresetWalls(cloneWalls(nextPresetWalls));
-    setWalls(cloneWalls(nextPresetWalls));
-    setUndoStack([]);
     setSource("reference");
+    setWorkspaceMode("answer");
     setRound(0);
     setPlaying(false);
     setValidation(null);
@@ -1144,10 +1135,73 @@ export default function Home() {
     setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSource("answer");
+    setWorkspaceMode("design");
+    setShowSearchResult(false);
     setRound(0);
     setPlaying(false);
     setValidation(null);
     setNotice("设置已解锁，可以继续增删珠子或移动起点与出口。 ");
+  }
+
+  function startAnswering(resetBoard = true) {
+    setWorkspaceMode("answer");
+    setSource("answer");
+    if (resetBoard) {
+      setWalls(cloneWalls(presetWalls));
+      setUndoStack([]);
+    }
+    setRound(0);
+    setPlaying(false);
+    setDisplayAngle(0);
+    setDisplayPositions(positionsFromBeads(beads));
+    setValidation(null);
+    setShowSearchResult(false);
+    setNotice("已进入答题模式：直接单击任意可编辑网格线放置挡板，再点一次取消；题目预置挡板不可移除。");
+  }
+
+  function validateCurrentBoard() {
+    if (puzzle) {
+      const result = validateAnswer(puzzle, walls, { requireExactDropRounds: false });
+      setValidation(result);
+      setSource("answer");
+      setRound(0);
+      setNotice(result.ok ? "答案有效，可以播放。" : "已列出需要修改的规则。 ");
+      return;
+    }
+
+    const order = beads.map((bead) => bead.color);
+    const solved = puzzleFromSolvedWalls(
+      size,
+      beads,
+      order,
+      plannedRotations,
+      walls,
+      presetWalls,
+    );
+    const actual = simulateWalls(walls, beads, plannedRotations).flatMap((frame) => frame.dropped);
+    const actualText = actual.length > 0
+      ? actual.map((color) => `${COLOR_LABEL[color]}珠`).join(" → ")
+      : "没有珠子离场";
+    const expectedText = order.map((color) => `${COLOR_LABEL[color]}珠`).join(" → ");
+    const result = solved
+      ? {
+        ok: true,
+        title: "答案正确",
+        details: [`全部珠子按 ${expectedText} 的顺序从共用出口离场。`],
+      }
+      : {
+        ok: false,
+        title: "还差一点",
+        details: [
+          `目标顺序：${expectedText}。`,
+          `当前结果：${actualText}。`,
+          actual.length < order.length ? `仍有 ${order.length - actual.length} 颗珠子没有在规定轮次内离场。` : "珠子的掉落先后不符合题目顺序。",
+        ],
+      };
+    setValidation(result);
+    setSource("answer");
+    setRound(0);
+    setNotice(result.ok ? "答案有效，可以播放。" : "已列出需要修改的规则。 ");
   }
 
   function fillWalls(filled: boolean) {
@@ -1155,9 +1209,9 @@ export default function Home() {
     const basePresetWalls = puzzle?.presetWalls ?? presetWalls;
     const next = filled
       ? fullyWalledAnswer(size, puzzle?.beads ?? beads)
-      : puzzle ? cloneWalls(basePresetWalls) : makeAnswerWalls(size, beads);
+      : isAnswerMode ? cloneWalls(basePresetWalls) : makeAnswerWalls(size, beads);
     setWalls(next);
-    if (!puzzle) setPresetWalls(cloneWalls(next));
+    if (!isAnswerMode) setPresetWalls(cloneWalls(next));
     setValidation(null);
     setRound(0);
   }
@@ -1166,7 +1220,7 @@ export default function Home() {
     const previous = undoStack[undoStack.length - 1];
     if (!previous) return;
     setWalls(previous);
-    if (!puzzle) setPresetWalls(cloneWalls(previous));
+    if (!isAnswerMode) setPresetWalls(cloneWalls(previous));
     setUndoStack((stack) => stack.slice(0, -1));
     setValidation(null);
   }
@@ -1240,7 +1294,8 @@ export default function Home() {
     setWalls(cloneWalls(nextPresetWalls));
     setUndoStack([]);
     setSource("answer");
-    setSetupMode(nextPuzzle ? "walls" : "start");
+    setWorkspaceMode("answer");
+    setShowSearchResult(false);
     setRound(0);
     setPlaying(false);
     setDisplayAngle(0);
@@ -1372,10 +1427,11 @@ export default function Home() {
     setPuzzle(nextPuzzle);
     setSolutions(nextPuzzle ? [nextPuzzle] : []);
     setPresetWalls(cloneWalls(nextPresetWalls));
-    setWalls(cloneWalls(item.walls));
+    if (item.kind === "answer" || !nextPuzzle) setWalls(cloneWalls(item.walls));
     setUndoStack([]);
     setSource(item.kind === "generated" && nextPuzzle ? "reference" : "answer");
-    setSetupMode("walls");
+    setWorkspaceMode("answer");
+    setShowSearchResult(false);
     setRound(0);
     setPlaying(false);
     setDisplayAngle(0);
@@ -1490,6 +1546,8 @@ export default function Home() {
         setPresetWalls(cloneWalls(nextPresetWalls));
         setWalls(cloneWalls(nextPresetWalls));
         setSource("answer");
+        setWorkspaceMode("answer");
+        setShowSearchResult(false);
         setRound(0);
         setValidation(null);
         setNotice("题目已读取；旧的多出口配置会自动统一到第一个共用出口。 ");
@@ -1523,6 +1581,14 @@ export default function Home() {
       <div className="workspace">
         <aside className="control-panel">
           <div className="panel-heading"><span className="step-number">01</span><div><p className="section-kicker">自定义条件</p><h2>珠子、盘面与目标</h2></div></div>
+
+          <section className={`workspace-mode-card ${isAnswerMode ? "answering" : "designing"}`} aria-label="出题与答题模式">
+            <div><span className="field-label">当前：{isAnswerMode ? "答题模式" : "出题编辑"}</span><small>{isAnswerMode ? "只改作答挡板，不会改动题目" : "拖动珠子、单击挡板或外边线即可改题"}</small></div>
+            <div className="workspace-mode-switch">
+              <button type="button" className={!isAnswerMode ? "selected" : ""} onClick={() => { if (isAnswerMode) resetSetup(); }}>出题编辑</button>
+              <button type="button" className={isAnswerMode ? "selected" : ""} onClick={() => startAnswering(!isAnswerMode)}>开始答题</button>
+            </div>
+          </section>
 
           <section className="library-card" aria-label="题目与对应解">
             <div className="library-heading">
@@ -1616,8 +1682,8 @@ export default function Home() {
           </section>
 
           <section className="control-section compact-settings">
-            <label><span className="field-label">盘面大小</span><div className="number-unit"><input aria-label="盘面大小" type="number" min={5} max={16} value={size} disabled={Boolean(puzzle)} onChange={(event) => updateSize(Number(event.target.value))} /><span>× {size}</span></div></label>
-            <label><span className="field-label">题目旋转轮数</span><div className="number-unit"><input aria-label="题目旋转轮数" type="number" min={1} max={30} value={turnCount} disabled={Boolean(puzzle)} onChange={(event) => updateTurnCount(Number(event.target.value))} /><span>轮</span></div></label>
+            <label><span className="field-label">盘面大小</span><div className="number-unit"><input aria-label="盘面大小" type="number" min={5} max={16} value={size} disabled={isAnswerMode} onChange={(event) => updateSize(Number(event.target.value))} /><span>× {size}</span></div></label>
+            <label><span className="field-label">题目旋转轮数</span><div className="number-unit"><input aria-label="题目旋转轮数" type="number" min={1} max={30} value={turnCount} disabled={isAnswerMode} onChange={(event) => updateTurnCount(Number(event.target.value))} /><span>轮</span></div></label>
           </section>
 
           <section className="control-section">
@@ -1627,7 +1693,7 @@ export default function Home() {
                 <div
                   key={bead.color}
                   className={`bead-config ${activeColor === bead.color ? "selected" : ""} ${draggedColor === bead.color ? "dragging" : ""}`}
-                  draggable={!puzzle}
+                  draggable={!isAnswerMode}
                   onClick={() => setActiveColor(bead.color)}
                   onDragStart={(event) => {
                     setDraggedColor(bead.color);
@@ -1635,7 +1701,7 @@ export default function Home() {
                     event.dataTransfer.setData("text/plain", bead.color);
                   }}
                   onDragOver={(event) => {
-                    if (!puzzle) {
+                    if (!isAnswerMode) {
                       event.preventDefault();
                       event.dataTransfer.dropEffect = "move";
                     }
@@ -1649,45 +1715,25 @@ export default function Home() {
                   onDragEnd={() => setDraggedColor(null)}
                 >
                   <span className={`mini-ball ${bead.color}`} />
-                  <select aria-label={`${COLOR_LABEL[bead.color]}珠颜色`} value={bead.color} disabled={Boolean(puzzle)} onClick={(event) => event.stopPropagation()} onChange={(event) => changeColor(bead.color, event.target.value as Color)}>
+                  <select aria-label={`${COLOR_LABEL[bead.color]}珠颜色`} value={bead.color} disabled={isAnswerMode} onClick={(event) => event.stopPropagation()} onChange={(event) => changeColor(bead.color, event.target.value as Color)}>
                     {ALL_COLORS.map((color) => <option key={color} value={color} disabled={beads.some((item) => item.color === color && item.color !== bead.color)}>{COLOR_LABEL[color]}珠</option>)}
                   </select>
                   <div className="bead-locations"><span>起 {cellLabel(bead.start.r, bead.start.c)}</span><span>共用出口</span></div>
                   <span className="auto-drop-round">轮次自动</span>
                   <div className="reorder-buttons">
-                    <button aria-label={`${COLOR_LABEL[bead.color]}珠提前`} disabled={Boolean(puzzle) || index === 0} onClick={(event) => { event.stopPropagation(); moveBead(bead.color, -1); }}>↑</button>
-                    <button aria-label={`${COLOR_LABEL[bead.color]}珠延后`} disabled={Boolean(puzzle) || index === beads.length - 1} onClick={(event) => { event.stopPropagation(); moveBead(bead.color, 1); }}>↓</button>
+                    <button aria-label={`${COLOR_LABEL[bead.color]}珠提前`} disabled={isAnswerMode || index === 0} onClick={(event) => { event.stopPropagation(); moveBead(bead.color, -1); }}>↑</button>
+                    <button aria-label={`${COLOR_LABEL[bead.color]}珠延后`} disabled={isAnswerMode || index === beads.length - 1} onClick={(event) => { event.stopPropagation(); moveBead(bead.color, 1); }}>↓</button>
                   </div>
-                  <button className="remove-bead" aria-label={`删除${COLOR_LABEL[bead.color]}珠`} disabled={Boolean(puzzle) || beads.length === 1} onClick={(event) => { event.stopPropagation(); removeBead(bead.color); }}>×</button>
+                  <button className="remove-bead" aria-label={`删除${COLOR_LABEL[bead.color]}珠`} disabled={isAnswerMode || beads.length === 1} onClick={(event) => { event.stopPropagation(); removeBead(bead.color); }}>×</button>
                 </div>
               ))}
             </div>
-            {unusedColors.length > 0 && !puzzle && (
+            {unusedColors.length > 0 && !isAnswerMode && (
               <div className="add-colors"><span>添加</span>{unusedColors.map((color) => <button key={color} className={`add-${color}`} onClick={() => addBead(color)}>＋{COLOR_LABEL[color]}珠</button>)}</div>
             )}
           </section>
 
-          <section className="control-section">
-            <span className="field-label">盘面编辑模式</span>
-            <div className="placement-switch">
-              <button className={setupMode === "start" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("start")}>放起点</button>
-              <button className={setupMode === "exit" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("exit")}>放共用出口</button>
-              <button className={setupMode === "walls" ? "selected" : ""} disabled={Boolean(puzzle)} onClick={() => setSetupMode("walls")}>预置挡板</button>
-            </div>
-            <p className="placement-help">
-              {setupMode === "start"
-                ? <>当前：<b>{COLOR_LABEL[activeBead.color]}珠</b> · 点击或拖动珠子换格</>
-                : setupMode === "exit"
-                  ? <>当前共用出口：<b>{exitLabel(beads[0].exit)}</b> · 点击盘面最外侧边线</>
-                  : <>点击网格线预置题目挡板，再点一次取消；这些挡板会固定保留在所有作答和系统解中</>}
-            </p>
-          </section>
-
-          {!puzzle
-            ? <div className="generation-actions"><button className="primary-button" onClick={() => generate(true)} disabled={busy}>{busy ? "正在先找一套正解…" : "生成正解：先少轮，再少挡板"}</button>{busy && <button className="text-button cancel-search" onClick={cancelGeneration}>取消搜索</button>}</div>
-            : busy
-              ? <button className="secondary-button full" onClick={cancelGeneration}>已显示正解 · 停止后台优化</button>
-              : <button className="secondary-button full" onClick={resetSetup}>修改全部设置</button>}
+          <div className="generation-actions"><button className="primary-button" onClick={() => generate(true)} disabled={busy}>{busy ? "正在搜索；找到后会立即弹出…" : "搜索系统解（不清空我的作答）"}</button>{busy && <button className="text-button cancel-search" onClick={cancelGeneration}>取消搜索</button>}</div>
 
           {puzzle && (
             <section className="puzzle-card">
@@ -1717,16 +1763,16 @@ export default function Home() {
 
         <section className="board-panel">
           <div className="board-toolbar">
-            <div><p className="section-kicker">{puzzle ? "绘制与验证" : setupMode === "start" ? "自由放置起点" : setupMode === "exit" ? "设置共用出口" : "预置题面挡板"}</p><h2>{puzzle ? source === "answer" ? "你的迷宫" : "参考迷宫" : `${size}×${size} 自定义盘面`}</h2></div>
+            <div><p className="section-kicker">{isAnswerMode ? "作答与验证" : "直接编辑题面"}</p><h2>{isAnswerMode ? source === "answer" ? "你的迷宫" : "参考迷宫" : `${size}×${size} 自定义盘面`}</h2></div>
             <div className="board-toolbar-actions">
               <div className="board-stat-pill"><span>插板</span><strong>{currentStats.panelCount}</strong><small>预置 {presetPanelCount} · 新增 {addedPanelCount}</small></div>
               {puzzle && <div className="source-switch"><button className={source === "answer" ? "selected" : ""} onClick={() => { setSource("answer"); setRound(0); }}>我的答案</button><button className={source === "reference" ? "selected" : ""} onClick={() => { setSource("reference"); setRound(0); }}>查看参考</button></div>}
             </div>
           </div>
 
-          {!puzzle && setupMode === "walls" && <div className="drawing-tools"><div className="toggle-wall-hint">单击网格线预置挡板，再点一次取消；珠子托板也属于预置挡板</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>只留托板</button><button onClick={() => fillWalls(true)}>全部预置</button></div></div>}
-          {puzzle && source === "answer" && <div className="drawing-tools"><div className="tool-group"><button className={tool === "wall" ? "selected" : ""} onClick={() => setTool("wall")}><span className="wall-icon" />新增挡板</button><button className={tool === "erase" ? "selected" : ""} onClick={() => setTool("erase")}><span className="eraser-icon" />擦除新增</button></div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>恢复预置</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
-          {(setupMode === "walls" || puzzle) && <div className="wall-legend" aria-label="挡板颜色说明"><span><i className="preset-swatch" />陶色：题目预置，不可移除</span><span><i className="answer-swatch" />深色：作答或系统新增</span></div>}
+          {!isAnswerMode && <div className="drawing-tools"><div className="toggle-wall-hint">无需选择工具：拖动珠子即可换起点；悬停网格线会亮，单击放置预置挡板，再点一次取消；单击外边线设置共用出口。</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>只留托板</button><button onClick={() => fillWalls(true)}>全部预置</button></div></div>}
+          {isAnswerMode && source === "answer" && <div className="drawing-tools"><div className="toggle-wall-hint">悬停任意可编辑网格线会亮；单击放置挡板，再点一次取消。陶色题目挡板不会被删除。</div><div className="tool-group subtle"><button onClick={undo} disabled={undoStack.length === 0}>撤销</button><button onClick={() => fillWalls(false)}>重置作答</button><button onClick={() => fillWalls(true)}>全部封墙</button></div></div>}
+          <div className="wall-legend" aria-label="挡板颜色说明"><span><i className="preset-swatch" />陶色：题目预置，答题时不可移除</span><span><i className="answer-swatch" />深色：当前新增挡板</span></div>
 
           <Board
             size={size}
@@ -1736,14 +1782,11 @@ export default function Home() {
             positions={boardPositions}
             angle={displayAngle}
             moveDurations={frameMovementDurations(currentFrame)}
-            editStarts={!playing && round === 0 && !puzzle && setupMode === "start"}
-            editExits={!playing && round === 0 && !puzzle && setupMode === "exit"}
-            editWalls={!playing && round === 0 && ((!puzzle && setupMode === "walls") || Boolean(puzzle && source === "answer"))}
-            lockPresetWalls={Boolean(puzzle)}
-            tool={tool}
-            activeColor={activeColor}
+            editStarts={!playing && round === 0 && !isAnswerMode}
+            editExits={!playing && round === 0 && !isAnswerMode}
+            editWalls={!playing && round === 0 && (!isAnswerMode || source === "answer")}
+            lockPresetWalls={isAnswerMode}
             onEdge={editEdge}
-            onCell={chooseStart}
             onBallPick={setActiveColor}
             onBallMove={chooseStartForColor}
           />
@@ -1762,7 +1805,7 @@ export default function Home() {
             <span>逐轮掉落</span>
             <p>{dropEventText(currentStats.events)}</p>
           </div>
-          <div className={`rotation-list ${puzzle ? "" : "rotation-editor"}`} aria-label={puzzle ? "完整旋转序列" : "逐轮顺逆设置"}>
+          <div className={`rotation-list ${isAnswerMode ? "" : "rotation-editor"}`} aria-label={isAnswerMode ? "完整旋转序列" : "逐轮顺逆设置"}>
             {activeRotations.map((rotation, index) => {
               const eventColors = frames[index + 1]?.dropped ?? [];
               const eventDots = eventColors.length > 0 && (
@@ -1777,7 +1820,7 @@ export default function Home() {
                   ))}
                 </span>
               );
-              if (!puzzle) {
+              if (!isAnswerMode) {
                 return (
                   <div key={`edit-${index}`} className={`${index + 1 === round ? "current" : ""} ${index + 1 < round ? "done" : ""}`}>
                     <button className="round-jump" type="button" onClick={() => { setRound(index + 1); setPlaying(false); }}>{String(index + 1).padStart(2, "0")}</button>
@@ -1790,14 +1833,14 @@ export default function Home() {
               return <button type="button" key={`${rotation}-${index}`} className={`${index + 1 === round ? "current" : ""} ${index + 1 < round ? "done" : ""}`} onClick={() => { setRound(index + 1); setPlaying(false); }}><span className="round-number">{String(index + 1).padStart(2, "0")}</span><b>{rotation === "cw" ? "↻" : "↺"}</b><em>{rotation === "cw" ? "顺时针" : "逆时针"}</em>{eventDots}</button>;
             })}
           </div>
-          <div className="playback-controls"><button aria-label="上一步，快捷键左方向键" onClick={() => { setRound((value) => Math.max(0, value - 1)); setPlaying(false); }}>←</button><button className="play-button" onClick={() => { if (round >= playbackTurnCount) setRound(0); setPlaying((value) => !value); }}>{playing ? "暂停" : puzzle ? "播放解答" : "试玩挡板"}</button><button aria-label="下一步，快捷键右方向键" onClick={() => { setRound((value) => Math.min(playbackTurnCount, value + 1)); setPlaying(false); }}>→</button></div>
+          <div className="playback-controls"><button aria-label="上一步，快捷键左方向键" onClick={() => { setRound((value) => Math.max(0, value - 1)); setPlaying(false); }}>←</button><button className="play-button" onClick={() => { if (round >= playbackTurnCount) setRound(0); setPlaying((value) => !value); }}>{playing ? "暂停" : isAnswerMode ? source === "reference" ? "播放系统解" : "播放作答" : "试玩题面"}</button><button aria-label="下一步，快捷键右方向键" onClick={() => { setRound((value) => Math.min(playbackTurnCount, value + 1)); setPlaying(false); }}>→</button></div>
           <p className="keyboard-hint">空格：播放/暂停　←：上一步　→：下一步</p>
           <div className="current-action">{round === 0 ? <p><span>第 0 轮 · 起点就绪</span>每颗珠子正下方都有直接接触的托板；程序从第一次 90° 旋转后开始按离散规则结算</p> : <p><span>第 {round} 次 · {rotationAtRound === "cw" ? "顺时针 90°" : "逆时针 90°"}</span>{currentFrame.movementOrder.length > 0 ? <>盘面定位后移动：{currentFrame.movementOrder.map((color) => `${COLOR_LABEL[color]}珠`).join(" → ")}</> : "定位后珠子未移动"}{currentFrame.blocked.length > 0 && <em>挡板或占位限制：{currentFrame.blocked.map((color) => `${COLOR_LABEL[color]}珠`).join("、")}</em>}{currentFrame.dropped.length > 0 && <b>{currentFrame.dropped.map((color) => `${COLOR_LABEL[color]}珠`).join("、")}掉落</b>}</p>}</div>
-          {puzzle ? (
+          {isAnswerMode ? (
             <>
-              <button className="primary-button" onClick={() => { const result = validateAnswer(puzzle, walls, { requireExactDropRounds: false }); setValidation(result); setSource("answer"); setRound(0); setNotice(result.ok ? "答案有效，可以播放。" : "已列出需要修改的规则。 "); }}>验证我的迷宫</button>
+              <button className="primary-button" onClick={validateCurrentBoard}>验证我的迷宫</button>
               <button className="secondary-button full" onClick={() => {
-                exportPng(size, displayedWalls, puzzle.beads, currentFrame.positions)
+                exportPng(size, displayedWalls, playbackBeads, currentFrame.positions)
                   .then(() => setNotice("当前盘面 PNG 已生成，请在浏览器下载列表中查看。 "))
                   .catch(() => setNotice("PNG 生成失败，请刷新页面后重试。 "));
               }}>导出当前盘面图片</button>
@@ -1811,6 +1854,8 @@ export default function Home() {
           )}
         </aside>
       </div>
+
+      {showSearchResult && puzzle && <div className="search-result-toast"><button className="toast-close" onClick={() => setShowSearchResult(false)}>×</button><p className="section-kicker">系统搜索</p><h3>已找到完整正解</h3><p>第 <strong>{puzzleCompletionRound(puzzle)}</strong> 轮完成，内部插板 <strong>{puzzle.panelCount ?? countInternalPanels(puzzle.referenceWalls)}</strong> 片。{busy ? "后台仍在继续压缩轮次和挡板。" : "搜索已经完成。"}</p><div><button onClick={() => { setSource("reference"); setRound(0); setPlaying(false); setShowSearchResult(false); }}>查看系统解</button><button className="primary" onClick={() => startAnswering(false)}>继续我的作答</button></div></div>}
 
       {validation && <div className={`validation-toast ${validation.ok ? "success" : "warning"}`}><button className="toast-close" onClick={() => setValidation(null)}>×</button><p className="section-kicker">规则验证</p><h3>{validation.title}</h3><ul>{validation.details.map((detail) => <li key={detail}>{detail}</li>)}</ul>{validation.ok && <button onClick={() => setPlaying(true)}>播放我的答案</button>}</div>}
 
