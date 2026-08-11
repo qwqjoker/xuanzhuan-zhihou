@@ -714,6 +714,12 @@ export default function Home() {
           setSelectedQuestionId(first.id);
           setQuestionName(first.name);
           applySavedQuestion(first);
+          const firstAnswer = first.answers[0];
+          if (firstAnswer) {
+            setSelectedBoardId(firstAnswer.id);
+            setAnswerName(firstAnswer.name);
+            applySavedBoard(firstAnswer, first);
+          }
           setNotice(`已从整库链接载入 ${sharedLibrary.length} 道题及其全部对应解。`);
         } else if (window.location.hash.startsWith(SHARE_HASH_PREFIX)) {
           const token = window.location.hash.slice(SHARE_HASH_PREFIX.length);
@@ -722,6 +728,12 @@ export default function Home() {
           setSelectedQuestionId(shared.id);
           setQuestionName(shared.name);
           applySavedQuestion(shared);
+          const firstAnswer = shared.answers[0];
+          if (firstAnswer) {
+            setSelectedBoardId(firstAnswer.id);
+            setAnswerName(firstAnswer.name);
+            applySavedBoard(firstAnswer, shared);
+          }
           setNotice(`已从分享链接载入“${shared.name}”及其 ${shared.answers.length} 个解。`);
         }
       } catch {
@@ -1439,15 +1451,11 @@ export default function Home() {
     setNotice(`解已改名为“${name}”。`);
   }
 
-  function loadSavedBoard() {
-    const item = selectedSavedBoard ? normalizeSavedBoardExitWalls(selectedSavedBoard) : null;
-    if (!item) {
-      setNotice("请先从盘面与解的下拉框选择一项。");
-      return;
-    }
+  function applySavedBoard(savedBoard: SavedBoard, parentQuestion: SavedQuestion | null) {
+    const item = normalizeSavedBoardExitWalls(savedBoard);
     const nextBeads = structuredClone(item.beads);
     const nextPresetWalls = item.puzzle?.presetWalls
-      ?? selectedSavedQuestion?.presetWalls
+      ?? parentQuestion?.presetWalls
       ?? makeAnswerWalls(item.size, nextBeads);
     const nextPuzzle = item.puzzle
       ? { ...structuredClone(item.puzzle), presetWalls: item.puzzle.presetWalls ?? cloneWalls(nextPresetWalls) }
@@ -1473,6 +1481,14 @@ export default function Home() {
     setNotice(`已载入“${item.name}”；点击播放即可查看逐轮掉落。`);
   }
 
+  function loadSavedBoard() {
+    if (!selectedSavedBoard) {
+      setNotice("请先从盘面与解的下拉框选择一项。");
+      return;
+    }
+    applySavedBoard(selectedSavedBoard, selectedSavedQuestion);
+  }
+
   function deleteSavedBoard() {
     if (!selectedSavedQuestion || !selectedSavedBoard) return;
     setSavedQuestions((items) => items.map((question) => (
@@ -1492,7 +1508,7 @@ export default function Home() {
     }
     try {
       const token = await encodeShareData(selectedSavedQuestion);
-      const url = `${window.location.origin}${window.location.pathname}${SHARE_HASH_PREFIX}${token}`;
+      const url = `${window.location.origin}${window.location.pathname}?v=${Date.now().toString(36)}${SHARE_HASH_PREFIX}${token}`;
       try {
         await navigator.clipboard.writeText(url);
       } catch {
@@ -1518,7 +1534,7 @@ export default function Home() {
     }
     try {
       const token = await encodeShareData(savedQuestions);
-      const url = `${window.location.origin}${window.location.pathname}${LIBRARY_SHARE_HASH_PREFIX}${token}`;
+      const url = `${window.location.origin}${window.location.pathname}?v=${Date.now().toString(36)}${LIBRARY_SHARE_HASH_PREFIX}${token}`;
       try {
         await navigator.clipboard.writeText(url);
       } catch {
