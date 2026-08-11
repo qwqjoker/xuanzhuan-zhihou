@@ -26,6 +26,7 @@ import {
   simulateWalls,
   syncBeadSupportWalls,
   validateAnswer,
+  withConfiguredExits,
 } from "./maze";
 
 type BoardSource = "answer" | "reference";
@@ -116,18 +117,50 @@ function questionFingerprint(value: {
   });
 }
 
+function normalizePuzzleExitWalls(puzzle: Puzzle, fallbackPresetWalls?: WallGrid): Puzzle {
+  const presetSource = puzzle.presetWalls
+    ?? fallbackPresetWalls
+    ?? makeAnswerWalls(puzzle.size, puzzle.beads);
+  return {
+    ...puzzle,
+    referenceWalls: withConfiguredExits(puzzle.referenceWalls, puzzle.beads),
+    presetWalls: withConfiguredExits(presetSource, puzzle.beads),
+  };
+}
+
+function normalizeSavedBoardExitWalls(board: SavedBoard): SavedBoard {
+  return {
+    ...board,
+    walls: withConfiguredExits(board.walls, board.beads),
+    puzzle: board.puzzle ? normalizePuzzleExitWalls(board.puzzle) : undefined,
+  };
+}
+
+function normalizeSavedQuestionExitWalls(item: SavedQuestion): SavedQuestion {
+  const presetSource = item.presetWalls
+    ?? item.puzzle?.presetWalls
+    ?? makeAnswerWalls(item.size, item.beads);
+  const presetWalls = withConfiguredExits(presetSource, item.beads);
+  return {
+    ...item,
+    presetWalls,
+    puzzle: item.puzzle ? normalizePuzzleExitWalls(item.puzzle, presetWalls) : undefined,
+    solutions: Array.isArray(item.solutions)
+      ? item.solutions.map((solution) => normalizePuzzleExitWalls(solution, presetWalls))
+      : undefined,
+    answers: Array.isArray(item.answers)
+      ? item.answers.map(normalizeSavedBoardExitWalls)
+      : [],
+  };
+}
+
 function normalizeSavedLibraries(rawQuestions: unknown, rawBoards: unknown): SavedQuestion[] {
   const questions = (Array.isArray(rawQuestions) ? rawQuestions : [])
     .filter((item): item is SavedQuestion => Boolean(item && typeof item === "object"))
-    .map((item) => ({
-      ...item,
-      presetWalls: item.presetWalls
-        ? cloneWalls(item.presetWalls)
-        : makeAnswerWalls(item.size, item.beads),
-      answers: Array.isArray(item.answers) ? item.answers : [],
-    }));
+    .map(normalizeSavedQuestionExitWalls);
   const legacyBoards = (Array.isArray(rawBoards) ? rawBoards : [])
-    .filter((item): item is SavedBoard => Boolean(item && typeof item === "object"));
+    .filter((item): item is SavedBoard => Boolean(item && typeof item === "object"))
+    .map(normalizeSavedBoardExitWalls);
   if (legacyBoards.length === 0) return questions;
 
   const migrated = questions.map((item) => ({ ...item, answers: [...item.answers] }));
@@ -230,16 +263,11 @@ function normalizeSharedQuestion(value: unknown, tokenSuffix: string): SavedQues
     || item.rotations.length < 1
     || item.rotations.length > 30
   ) throw new Error("分享内容无效");
-  return {
+  return normalizeSavedQuestionExitWalls({
     ...item,
     id: item.id || `shared-${tokenSuffix}`,
-    presetWalls: item.presetWalls
-      ? cloneWalls(item.presetWalls)
-      : item.puzzle?.presetWalls
-        ? cloneWalls(item.puzzle.presetWalls)
-        : makeAnswerWalls(item.size, item.beads),
     answers: Array.isArray(item.answers) ? item.answers.slice(0, 50) : [],
-  };
+  });
 }
 
 async function decodeSharedQuestion(token: string): Promise<SavedQuestion> {
@@ -875,6 +903,8 @@ export default function Home() {
       ...bead,
       exit: { cell: { ...exit.cell }, direction: exit.direction },
     }));
+    setWalls((current) => withConfiguredExits(current, next));
+    setPresetWalls((current) => withConfiguredExits(current, next));
     setBeads(next);
     setRound(0);
     setPlaying(false);
@@ -1024,9 +1054,10 @@ export default function Home() {
     setNotice("正在验证正解；按轮数从少到多搜索，确定最少轮后再比较插板数。");
     let receivedPartial = false;
     const showGeneratedResults = (results: Puzzle[]) => {
-      const result = results[0];
+      const normalizedResults = results.map((item) => normalizePuzzleExitWalls(item, presetWalls));
+      const result = normalizedResults[0];
       if (!result) return;
-      setSolutions(results);
+      setSolutions(normalizedResults);
       setDisplayPositions(positionsFromBeads(result.beads));
       setDisplayAngle(0);
       lastAnimatedRound.current = 0;
@@ -1110,6 +1141,7 @@ export default function Home() {
   }
 
   function selectSolution(next: Puzzle, index: number) {
+    next = normalizePuzzleExitWalls(next, presetWalls);
     setPuzzle(next);
     setDropTargets({ ...next.dropRounds });
     setDisplayPositions(positionsFromBeads(next.beads));
@@ -1226,7 +1258,7 @@ export default function Home() {
   }
 
   function makeQuestionSnapshot(name: string, id = newLibraryId("question"), answers: SavedBoard[] = []): SavedQuestion {
-    return {
+    return normalizeSavedQuestionExitWalls({
       id,
       name,
       savedAt: new Date().toISOString(),
@@ -1239,7 +1271,7 @@ export default function Home() {
       solutions: solutions.length > 0 ? structuredClone(solutions) : undefined,
       selectedSolutionIndex: puzzle ? Math.max(0, solutions.indexOf(puzzle)) : undefined,
       answers,
-    };
+    });
   }
 
   function saveCurrentQuestion() {
@@ -1266,6 +1298,7 @@ export default function Home() {
   }
 
   function applySavedQuestion(item: SavedQuestion) {
+    item = normalizeSavedQuestionExitWalls(item);
     const nextBeads = structuredClone(item.beads);
     const nextPresetWalls = item.presetWalls
       ? cloneWalls(item.presetWalls)
@@ -1341,8 +1374,8 @@ export default function Home() {
       size,
       beads: structuredClone(playbackBeads),
       rotations: [...activeRotations],
-      walls: cloneWalls(walls),
-      puzzle: puzzle ? structuredClone(puzzle) : undefined,
+      walls: withConfiguredExits(walls, playbackBeads),
+      puzzle: puzzle ? normalizePuzzleExitWalls(structuredClone(puzzle)) : undefined,
     };
     setSavedQuestions((items) => items.map((question) => (
       question.id === selectedSavedQuestion.id
@@ -1373,8 +1406,8 @@ export default function Home() {
       size: solution.size,
       beads: structuredClone(solution.beads),
       rotations: [...solution.rotations],
-      walls: cloneWalls(solution.referenceWalls),
-      puzzle: structuredClone(solution),
+      walls: withConfiguredExits(solution.referenceWalls, solution.beads),
+      puzzle: normalizePuzzleExitWalls(structuredClone(solution)),
     }));
     setSavedQuestions((items) => items.map((question) => (
       question.id === selectedSavedQuestion.id
@@ -1407,7 +1440,7 @@ export default function Home() {
   }
 
   function loadSavedBoard() {
-    const item = selectedSavedBoard;
+    const item = selectedSavedBoard ? normalizeSavedBoardExitWalls(selectedSavedBoard) : null;
     if (!item) {
       setNotice("请先从盘面与解的下拉框选择一项。");
       return;
@@ -1525,13 +1558,16 @@ export default function Home() {
         ) throw new Error();
         const shared = value.beads[0].exit;
         const normalizedBeads = value.beads.map((bead) => ({ ...bead, exit: { cell: { ...shared.cell }, direction: shared.direction } }));
-        const nextPresetWalls = value.presetWalls ?? makeAnswerWalls(value.size, normalizedBeads);
-        const normalized = {
+        const nextPresetWalls = withConfiguredExits(
+          value.presetWalls ?? makeAnswerWalls(value.size, normalizedBeads),
+          normalizedBeads,
+        );
+        const normalized = normalizePuzzleExitWalls({
           ...value,
           beads: normalizedBeads,
           presetWalls: cloneWalls(nextPresetWalls),
           panelCount: value.panelCount ?? countInternalPanels(value.referenceWalls),
-        };
+        }, nextPresetWalls);
         setPuzzle(normalized);
         setSolutions([normalized]);
         setSize(value.size);

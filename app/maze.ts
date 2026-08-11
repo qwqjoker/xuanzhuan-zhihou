@@ -219,6 +219,26 @@ function setBoundaryWall(
   if (direction === "right") walls.v[cell.r][size] = value;
 }
 
+export function withConfiguredExits(walls: WallGrid, beads: BeadConfig[]): WallGrid {
+  const next = cloneWalls(walls);
+  const size = next.v[0].length - 1;
+
+  // Boundary openings are derived data: every outside edge is a wall except
+  // for the exits declared by the beads. This also repairs older saved/share
+  // data where the green exit marker existed but the wall matrix still kept
+  // that boundary closed.
+  for (let col = 0; col < size; col += 1) {
+    next.h[0][col] = true;
+    next.h[size][col] = true;
+  }
+  for (let row = 0; row < size; row += 1) {
+    next.v[row][0] = true;
+    next.v[row][size] = true;
+  }
+  beads.forEach((bead) => setBoundaryWall(next, bead.exit.cell, bead.exit.direction, false));
+  return next;
+}
+
 export function pathsToWalls(size: number, paths: MazePath[]): WallGrid {
   const walls = makeBlankWalls(size, true);
   paths.forEach((path) => {
